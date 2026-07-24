@@ -932,6 +932,10 @@ function drawUI() {
       "Left click when the needle is over a zone • blue zones give +1.5s",
       "Hold right mouse to speed up • missing slows you down • R restarts",
       "Click to start");
+    ui.font = `500 12px ${FONT}`;
+    ui.fillStyle = "rgba(200,190,170,0.5)";
+    ui.fillText("Fan recreation • Dota 2 art & audio © Valve Corporation • not affiliated with Valve",
+                CX, SY + SH - 14);
   } else if (phase === "gameover") {
     drawOverlayText(
       "Final score: " + score.toLocaleString(),
