@@ -34,7 +34,8 @@ converts:
 ## What came from where
 
 - `panorama/images/events/dark_carnival/lockpicking/` — lock body, dial,
-  shackle, sign, dungeon background, Slark head (8×8 flipbook sheet) and arm.
+  shackle, sign, dungeon background, Slark head (8×8 flipbook sheet, cropped
+  to 2×2 here — see Post-processing) and arm.
 - `sounds/misc/dark_carnival/` — lockpick SFX (`lockpick_*`), minigame music
   (`minigame_mus_lp_01..05`), win/lose stingers (`minigame_mus_win/lose_*`).
 - `sounds/vo/event_dark_carnival_slark_games/` — Slark voice lines
@@ -48,6 +49,28 @@ converts:
 - `panorama/fonts/` — `radiance-semibold.otf` (UI text) and
   `radiancem-semibold.otf` (digits-only monospace-numbers face). The original
   popup's CSS names the alias `monospaceNumbersFont`, which maps to RadianceM.
+
+## Post-processing
+
+Decompilation yields PNGs. The scene art is painted, so PNG stored it at roughly
+15× the necessary size; everything except the two small additive effect textures
+(`yellowflare2`, `softglow_tra`, left as PNG so lossy banding can't show in the
+glows) is re-encoded to WebP, taking `assets/` from 3.9 MB to 226 KB with no
+visible difference:
+
+```bash
+# scene art, no alpha to preserve
+cwebp -q 88 lockpicking_background_psd.png -o lockpicking_background.webp
+# sprites with alpha
+cwebp -q 90 -alpha_q 100 lock_background_psd.png -o lock_background.webp
+# Slark: the extracted flipbook is 8x8 (64 blink/eye variants) but the game
+# shows only three of them, so crop to the top-left 2x2 block —
+# idle (0,0), blink (1,0), capture reaction (0,1)
+cwebp -q 90 -alpha_q 100 -crop 0 0 840 1000 slark_head_psd.png -o slark_head.webp
+```
+
+The `_psd.png` originals are not kept in the repo; regenerate them with the
+steps above if the art ever needs re-cutting.
 
 ## Reproducing
 

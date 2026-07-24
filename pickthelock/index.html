@@ -68,25 +68,32 @@ const FONT = '"Radiance", Georgia, "Times New Roman", serif';
 const FONT_NUM = '"RadianceM", "Radiance", Georgia, serif'; // fixed-width digits
 
 // ---------- Assets ----------
+// WebP: the scene art is painted, so PNG was storing it at ~15x the size for
+// no visible gain (3.9MB of assets became 226KB). The two additive effect
+// textures stay PNG — they are tiny and lossy banding would show in the glow.
+// Browser support is a non-issue: the importmap above already requires a
+// browser far newer than WebP.
 const TEX_NAMES = {
-  bg:    "assets/lockpicking_background_psd.png",
-  lock:  "assets/lock_background_psd.png",
-  dial:  "assets/lock_dial_psd.png",
-  shank: "assets/lock_shank_psd.png",
-  slark: "assets/slark_head_psd.png",
-  arm:   "assets/slark_arm_psd.png",
+  bg:    "assets/lockpicking_background.webp",
+  lock:  "assets/lock_background.webp",
+  dial:  "assets/lock_dial.webp",
+  shank: "assets/lock_shank.webp",
+  slark: "assets/slark_head.webp",
+  arm:   "assets/slark_arm.webp",
   flare: "assets/yellowflare2.png",
   glow:  "assets/softglow_tra.png",
 };
-// slark head is an 8x8 sprite sheet of 420x500 frames (blink/eye variants)
-const SLARK_COLS = 8, SLARK_ROWS = 8;
+// Slark's head is a sprite sheet of 420x500 frames. The extracted sheet is 8x8
+// (64 blink/eye variants) but the game only ever shows three of them, so it is
+// cropped to the top-left 2x2 block: idle, blink, and the capture reaction.
+const SLARK_COLS = 2, SLARK_ROWS = 2;
 let slarkBlink = 0;      // time left showing the blink frame
 let slarkReact = 0;      // time left showing the reaction frame (on capture)
 let slarkNext = 2;       // countdown to the next idle blink
 
 const TEX = {};
 const signImg = new Image();   // sign renders on the 2D UI layer
-signImg.src = "assets/sign_psd.png";
+signImg.src = "assets/sign.webp";
 let assetsReady = false;
 
 const SFX = {
@@ -140,7 +147,7 @@ function playFile(src, vol) {
 }
 
 // ---------- Layout ----------
-// Lock geometry (measured from lock_background_psd.png):
+// Lock geometry (measured from the source lock_background_psd.png):
 // image is 700x700, face circle center (345,346) radius 345,
 // recessed hole (where wedges live) starts at 0.82 of that radius.
 const HOLE_FRAC = 0.82;
@@ -933,7 +940,7 @@ function layout() {
 // ---------- Per-frame visual sync ----------
 function syncScene() {
   // slark sprite frame: reaction wins over blink, else idle
-  const frame = slarkReact > 0 ? 8 : (slarkBlink > 0 ? 1 : 0);
+  const frame = slarkReact > 0 ? 2 : (slarkBlink > 0 ? 1 : 0);
   const col = frame % SLARK_COLS, row = Math.floor(frame / SLARK_COLS);
   TEX.slark.offset.set(col / SLARK_COLS, row / SLARK_ROWS); // flipY=false: v=0 is sheet top
 
