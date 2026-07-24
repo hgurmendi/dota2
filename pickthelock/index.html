@@ -35,10 +35,6 @@
 "use strict";
 
 import * as THREE from "three";
-import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
-import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
-import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
-
 // Raw color pipeline: hex values pass straight through to the screen like the
 // Canvas 2D version (no sRGB/linear conversions to keep art colors identical).
 THREE.ColorManagement.enabled = false;
@@ -78,9 +74,11 @@ const MAX_ARCS        = 6;            // m_nMaxUnlocksOnBoard
 const BLUE_BASE_CHANCE = 0.15;        // m_flTimerIncreaseUnlockChance (%)
 const BLUE_ESCALATION  = 0.04;        // m_flTimerIncreaseUnlockEscalatingChance (%/spawn)
 const NEEDLE_GRACE     = 2.0 * DEG;   // hit tolerance beyond wedge edges
+const WIN_SCORE        = 6000;        // observed minimum score for the lock to open
 const TAU = Math.PI * 2;
 
-const FONT = 'Georgia, "Times New Roman", serif';
+const FONT = '"Radiance", Georgia, "Times New Roman", serif';
+const FONT_NUM = '"RadianceM", "Radiance", Georgia, serif'; // fixed-width digits
 
 // ---------- Assets ----------
 const TEX_NAMES = {
@@ -89,6 +87,9 @@ const TEX_NAMES = {
   dial:  "assets/lock_dial_psd.png",
   shank: "assets/lock_shank_psd.png",
   slark: "assets/slark_head_psd.png",
+  arm:   "assets/slark_arm_psd.png",
+  flare: "assets/yellowflare2.png",
+  glow:  "assets/softglow_tra.png",
 };
 // slark head is an 8x8 sprite sheet of 420x500 frames (blink/eye variants)
 const SLARK_COLS = 8, SLARK_ROWS = 8;
@@ -107,9 +108,48 @@ const SFX = {
   boost:   "assets/lockpick_boost.mp3",
 };
 function playSfx(name, vol = 0.6) {
+  if (!sfxOn) return;
   const a = new Audio(SFX[name]);
   a.volume = vol;
   a.play().catch(() => {}); // ignore autoplay restrictions
+}
+
+// looping background music (random lockpick track per run) + end stingers/VO
+const MUSIC_TRACKS = [1, 2, 3, 4, 5].map(i => "assets/minigame_mus_lp_0" + i + ".mp3");
+const LOSE_STINGERS = ["assets/minigame_mus_lose_01.mp3", "assets/minigame_mus_lose_02.mp3"];
+const WIN_STINGER = "assets/minigame_mus_win_01.mp3";
+const LOSE_VO = [1, 2, 3, 4, 5].map(i => "assets/slark_lockpick_gameover_0" + i + ".mp3");
+const WIN_VO = [1, 3, 4, 6].map(i => "assets/slark_lockpick_unlocked_0" + i + ".mp3");
+let musicEl = null;
+let sfxOn = true, musicOn = true; // separate toggles: effects vs music+voice
+try {
+  sfxOn = localStorage.getItem("lockpick_sfx") !== "0";
+  musicOn = localStorage.getItem("lockpick_music") !== "0";
+} catch (e) {}
+function setSfx(on) {
+  sfxOn = on;
+  try { localStorage.setItem("lockpick_sfx", on ? "1" : "0"); } catch (e) {}
+}
+function setMusic(on) {
+  musicOn = on;
+  try { localStorage.setItem("lockpick_music", on ? "1" : "0"); } catch (e) {}
+  if (musicEl) musicEl.volume = on ? 0.35 : 0;
+}
+function startMusic() {
+  stopMusic();
+  musicEl = new Audio(MUSIC_TRACKS[(Math.random() * MUSIC_TRACKS.length) | 0]);
+  musicEl.loop = true;
+  musicEl.volume = musicOn ? 0.35 : 0;
+  musicEl.play().catch(() => {});
+}
+function stopMusic() {
+  if (musicEl) { musicEl.pause(); musicEl = null; }
+}
+function playFile(src, vol) {
+  if (!musicOn) return;
+  const a = new Audio(src);
+  a.volume = vol;
+  a.play().catch(() => {});
 }
 
 // ---------- Layout ----------
@@ -118,11 +158,10 @@ function playSfx(name, vol = 0.6) {
 // recessed hole (where wedges live) starts at 0.82 of that radius.
 const HOLE_FRAC = 0.82;
 const LOCK_CX_FRAC = 345 / 700, LOCK_CY_FRAC = 346 / 700, LOCK_R_FRAC = 345 / 700;
-// letterboxed stage laid out in stage units so the composition is consistent
-// on any display. The aspect adapts to the viewport, clamped between a slim
-// phone shape and the original popup's desktop framing.
-const STAGE_ASPECT_MAX = 0.866;   // desktop: the original popup's framing
-const STAGE_ASPECT_MIN = 0.52;    // phones: tall and slim
+// letterboxed stage laid out in stage units. Fixed aspect matching the
+// original popup dialog so the composition is identical at every viewport
+// size; the dimmed backdrop fills the remaining space.
+const STAGE_ASPECT = 0.76;
 let W, H, SX, SY, SW, SH, CX, CY, R_LOCK, R_HOLE, R_DIAL, R_WEDGE_IN, R_WEDGE_OUT;
 
 // ---------- Game state ----------
@@ -139,19 +178,24 @@ let spawnTimer;
 let arcs = [];                // {center, half, color}
 let floaters = [];            // {x, y, text, color, age}
 let centerFloaters = [];      // "+1.5" style popups on the dial {text, color, age}
-let flashes = [];             // rim flashes {color, age}
 let sparkles = [];            // needle trail + capture bursts
                               // {x, y, vx, vy, age, life, size, color:[r,g,b], drag, grav}
 let timerPulse = 0;
 let best = 0;
 let restartLock = 0;          // seconds after losing during which clicks can't restart
 let boostLocked = false;      // on-screen toggle equivalent to holding RMB
+let won = false;              // score >= WIN_SCORE when time ran out
+let shankPop = 0;             // 0 closed .. 1 pried open (win animation)
+let shankBaseY = 0;           // shackle rest position, set in layout()
+let slarkRestY = 0, armRestY = 0; // idle-bob rest positions, set in layout()
+let sparkT = 1e9;             // time since the last miss spark flash
+let sparkX = 0, sparkY = 0, sparkRot = 0;
 
 function reset() {
   timeLeft = START_TIME;
   score = 0;
   elapsed = 0;
-  angle = -Math.PI / 2;
+  angle = Math.PI / 2; // needle starts at 12 o'clock like the original
   dir = 1;
   curSpeed = BASE_SPEED;
   boostMult = 1;
@@ -162,9 +206,11 @@ function reset() {
   arcs = [];
   floaters = [];
   centerFloaters = [];
-  flashes = [];
   sparkles = [];
   timerPulse = 0;
+  won = false;
+  shankPop = 0;
+  sparkT = 1e9;
   // boostLocked deliberately survives restarts
 }
 
@@ -192,6 +238,7 @@ const BURST_PALETTES = {
   yellow: ["#ffdf6b", "#ffc93f", "#ffffff", "#ffb347"].map(hexRGB),
 };
 const TRAIL_COLOR = hexRGB("#b48cff");
+const FLAME_PALETTE = ["#fff3c8", "#ffd23f", "#ffa02e", "#ff7a1a"].map(hexRGB);
 function spawnBurst(ang, color) {
   const r0 = (R_WEDGE_IN + R_WEDGE_OUT) / 2;
   const bx = CX + Math.cos(ang) * r0;
@@ -211,23 +258,25 @@ function spawnBurst(ang, color) {
   }
 }
 
-// dense red burst along the needle's length when the player misses
-const MISS_PALETTE = ["#ff4d4d", "#ff7a5c", "#ffb4a0", "#ffe0d8"].map(hexRGB);
+// miss: a spark star flashes on the needle at the ring and golden sparks
+// scatter from it (the red comes from the needle's glow, like the game)
+const MISS_PALETTE = ["#ffd23f", "#ffb347", "#ffe98a", "#ff8d3c"].map(hexRGB);
 function spawnMissBurst(ang) {
-  const nx = Math.cos(ang), ny = -Math.sin(ang);
-  for (let i = 0; i < 52; i++) {
-    // seed on the needle line, dial edge to ring, with slight jitter
-    const rr = R_DIAL * 0.6 + Math.random() * (R_WEDGE_OUT - R_DIAL * 0.6);
+  const r0 = (R_WEDGE_IN + R_WEDGE_OUT) / 2;
+  sparkX = CX + Math.cos(ang) * r0;
+  sparkY = CY - Math.sin(ang) * r0;
+  sparkRot = Math.random() * TAU;
+  sparkT = 0;
+  for (let i = 0; i < 40; i++) {
     const a = Math.random() * TAU;
-    const sp = 30 + Math.random() * 160;
+    const sp = 80 + Math.random() * 320;
     sparkles.push({
-      x: CX + nx * rr + (Math.random() - 0.5) * 6,
-      y: CY + ny * rr + (Math.random() - 0.5) * 6,
+      x: sparkX, y: sparkY,
       vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
-      age: 0, life: 0.35 + Math.random() * 0.4,
-      size: 2.5 + Math.random() * 3.5,
+      age: 0, life: 0.3 + Math.random() * 0.5,
+      size: 2 + Math.random() * 3.5,
       color: MISS_PALETTE[(Math.random() * MISS_PALETTE.length) | 0],
-      drag: 3, grav: 120,
+      drag: 2.2, grav: 260,
     });
   }
 }
@@ -250,7 +299,7 @@ function trySpawnArc() {
       // escalating pity: each yellow spawn raises the blue chance until one lands
       const isBlue = Math.random() < blueChance;
       blueChance = isBlue ? BLUE_BASE_CHANCE : blueChance + BLUE_ESCALATION;
-      arcs.push({ center, half, color: isBlue ? "blue" : "yellow" });
+      arcs.push({ center, half, half0: half, color: isBlue ? "blue" : "yellow" });
       return;
     }
   }
@@ -262,25 +311,32 @@ glCanvas.addEventListener("contextmenu", e => e.preventDefault());
 function startRun() {
   reset();
   phase = "playing";
+  startMusic();
 }
 
 // on-screen corner buttons (mobile): restart bottom-left, boost-lock bottom-right,
 // anchored inside the letterboxed stage
-const BTN_R = 34, BTN_PAD = 22;
+let BTN_R = 34, BTN_PAD = 22; // scaled with the stage in resize()
 function buttonRects() {
   return {
     restart: { x: SX + BTN_PAD + BTN_R, y: SY + SH - BTN_PAD - BTN_R },
     boost:   { x: SX + SW - BTN_PAD - BTN_R, y: SY + SH - BTN_PAD - BTN_R },
+    music:   { x: SX + SW - BTN_PAD - BTN_R, y: SY + BTN_PAD + BTN_R },
+    sfx:     { x: SX + SW - BTN_PAD - BTN_R * 3 - 12, y: SY + BTN_PAD + BTN_R },
   };
 }
 function hitButton(px, py) {
   const b = buttonRects();
   if (Math.hypot(px - b.restart.x, py - b.restart.y) <= BTN_R) return "restart";
   if (Math.hypot(px - b.boost.x, py - b.boost.y) <= BTN_R) return "boost";
+  if (Math.hypot(px - b.music.x, py - b.music.y) <= BTN_R) return "music";
+  if (Math.hypot(px - b.sfx.x, py - b.sfx.y) <= BTN_R) return "sfx";
   return null;
 }
 function pressButton(name) {
   if (name === "restart") { startRun(); return; } // like R: works any time
+  if (name === "music") { setMusic(!musicOn); return; }
+  if (name === "sfx") { setSfx(!sfxOn); return; }
   boostLocked = !boostLocked;
   if (boostLocked) playSfx("boost", 0.45);
 }
@@ -315,7 +371,6 @@ function primaryAction() {
       y: CY - Math.sin(arc.center) * fr,
       text: "+" + HIT_SCORE, color: "#ffe98a", age: 0,
     });
-    flashes.push({ color: arc.color === "blue" ? "#4db8ff" : "#ffd23f", age: 0 });
     spawnBurst(angle, arc.color);
     slarkReact = 0.35;
     arcs.splice(hitIndex, 1);
@@ -331,11 +386,26 @@ function primaryAction() {
     boostMult = 1;
     playSfx("miss", 0.6);
     spawnMissBurst(angle);
-    flashes.push({ color: "#ff4d4d", age: 0 });
   }
 }
 
+// #calibrate mode: click anywhere to read background-image coordinates
+const CALIBRATING = location.hash.includes("calibrate");
+if (CALIBRATING) {
+  const panel = document.createElement("div");
+  panel.style.cssText = "position:fixed;top:8px;left:8px;z-index:10;color:#0f0;" +
+    "background:rgba(0,0,0,0.8);font:14px monospace;padding:8px;white-space:pre";
+  panel.textContent = "CALIBRATE: click the flame spots\n";
+  document.body.appendChild(panel);
+  glCanvas.addEventListener("mousedown", e => {
+    const ix = Math.round((e.clientX - CX) / flameScale + 600);
+    const iy = Math.round((e.clientY - SY) / flameScale);
+    panel.textContent += `(${ix}, ${iy})\n`;
+  });
+}
+
 glCanvas.addEventListener("mousedown", e => {
+  if (CALIBRATING) return; // clicks only report coordinates in this mode
   if (e.button === 2) {
     if (!fastHeld && !boostLocked) playSfx("boost", 0.45); // already boosting = no sound
     fastHeld = true;
@@ -377,10 +447,6 @@ function update(dt) {
     centerFloaters[i].age += dt;
     if (centerFloaters[i].age > 1.0) centerFloaters.splice(i, 1);
   }
-  for (let i = flashes.length - 1; i >= 0; i--) {
-    flashes[i].age += dt;
-    if (flashes[i].age > 0.35) flashes.splice(i, 1);
-  }
   for (let i = sparkles.length - 1; i >= 0; i--) {
     const s = sparkles[i];
     s.age += dt;
@@ -395,6 +461,32 @@ function update(dt) {
   }
   timerPulse = Math.max(0, timerPulse - dt * 2.5);
   restartLock = Math.max(0, restartLock - dt);
+
+  // candle flames: continuous stream of rising, shrinking warm particles
+  if (flameEmit.length) {
+    flameAcc += dt * 130;
+    while (flameAcc >= 1) {
+      flameAcc -= 1;
+      for (const e of flameEmit) {
+        sparkles.push({
+          x: e.x + (Math.random() - 0.5) * 10 * flameScale,
+          y: e.y + (Math.random() - 0.5) * 6 * flameScale,
+          vx: (Math.random() - 0.5) * 14 * flameScale,
+          vy: -(45 + Math.random() * 60) * flameScale,
+          age: 0, life: 0.3 + Math.random() * 0.45,
+          size: (11 + Math.random() * 10) * flameScale,
+          color: FLAME_PALETTE[(Math.random() * FLAME_PALETTE.length) | 0],
+          drag: 0.6, grav: -80 * flameScale, // buoyant: accelerates upward
+        });
+      }
+    }
+  }
+
+  sparkT += dt;
+
+  // shackle pries open on a win
+  const popTarget = (phase === "gameover" && won) ? 1 : 0;
+  shankPop += (popTarget - shankPop) * Math.min(1, dt * 6);
 
   // slark idle blinking
   slarkBlink = Math.max(0, slarkBlink - dt);
@@ -413,7 +505,13 @@ function update(dt) {
     timeLeft = 0;
     phase = "gameover";
     best = Math.max(best, score);
-    restartLock = 2; // ignore stray clicks right after losing (R still works)
+    restartLock = 2; // ignore stray clicks right after the game ends (R still works)
+    won = score >= WIN_SCORE;
+    stopMusic();
+    playFile(won ? WIN_STINGER
+                 : LOSE_STINGERS[(Math.random() * LOSE_STINGERS.length) | 0], 0.5);
+    const vo = won ? WIN_VO : LOSE_VO;
+    setTimeout(() => playFile(vo[(Math.random() * vo.length) | 0], 0.7), 600);
     return;
   }
 
@@ -461,7 +559,7 @@ function update(dt) {
   for (let i = arcs.length - 1; i >= 0; i--) {
     const a = arcs[i];
     a.half -= WEDGE_SHRINK * dt;
-    if (a.half <= 1 * DEG) arcs.splice(i, 1);
+    if (a.half <= 0.25 * DEG) arcs.splice(i, 1); // sliver-thin before vanishing
   }
 
   // spawn rate ramps up over time
@@ -479,7 +577,6 @@ renderer.outputColorSpace = THREE.LinearSRGBColorSpace; // raw pass-through, no 
 const scene = new THREE.Scene();
 // pixel-space orthographic camera, y pointing down like Canvas 2D
 const camera = new THREE.OrthographicCamera(0, 1, 0, 1, -1000, 1000);
-let composer, bloomPass;
 
 const unitPlane = new THREE.PlaneGeometry(1, 1);
 function spriteMesh(tex, order) {
@@ -491,14 +588,16 @@ function spriteMesh(tex, order) {
   return m;
 }
 
-let backdropMesh, bgMesh, slarkMesh, shankMesh, lockMesh, dialMesh;
+let backdropMesh, bgMesh, slarkMesh, armMesh, shankMesh, lockMesh, dialMesh;
+let flameHalo1, flameHalo2, flameCore1, flameCore2;
+let flameEmit = [], flameScale = 1, flameAcc = 0; // candle particle emitters
 let wedgeMeshes = [];
-let needleMesh, tipMesh, points, pointsGeom;
+let needleMesh, tipMesh, sparkMesh, points, pointsGeom;
 const MAX_PARTICLES = 800;
 
 const WEDGE_COLORS = {
-  yellow: { c0: hexRGB("#97731c"), c1: hexRGB("#f0bc2e"), c2: hexRGB("#ffe98a"), rim: hexRGB("#fff5c8") },
-  blue:   { c0: hexRGB("#28568e"), c1: hexRGB("#4296ec"), c2: hexRGB("#8ed3ff"), rim: hexRGB("#cdeaff") },
+  yellow: { c0: hexRGB("#97731c"), c1: hexRGB("#f0bc2e"), c2: hexRGB("#ffe98a") },
+  blue:   { c0: hexRGB("#28568e"), c1: hexRGB("#4296ec"), c2: hexRGB("#8ed3ff") },
 };
 
 const wedgeShader = {
@@ -509,9 +608,9 @@ const wedgeShader = {
       gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
     }`,
   fragmentShader: /* glsl */`
-    uniform float uCenter, uHalf, uRIn, uROut, uLockSize;
+    uniform float uCenter, uHalf, uRIn, uROut, uLockSize, uBright;
     uniform vec2 uLockC;
-    uniform vec3 uC0, uC1, uC2, uRim;
+    uniform vec3 uC0, uC1, uC2;
     uniform sampler2D uLockTex;
     varying vec2 vLocal;
     const float PI = 3.14159265359;
@@ -538,12 +637,7 @@ const wedgeShader = {
                     1.0 - 2.0 * (1.0 - col) * (1.0 - lum),
                     step(0.5, lum));
       col = mix(col, ov, 0.75);
-      // beveled light edge, ~2px
-      float edgeA = (uHalf - d) * max(r, 0.05) * uROut;
-      float edgeR = min(r - uRIn, 1.0 - r) * uROut;
-      float rimK = 1.0 - smoothstep(0.0, 2.0, min(edgeA, edgeR));
-      col = mix(col, uRim, rimK * 0.55);
-      gl_FragColor = vec4(col, 1.0);
+      gl_FragColor = vec4(col * uBright, 1.0);
     }`,
 };
 
@@ -555,21 +649,23 @@ const needleShader = {
       gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
     }`,
   fragmentShader: /* glsl */`
-    uniform vec3 uA, uB;
+    uniform vec3 uCore, uGlow;
+    uniform float uGlowK;
     varying vec2 vUv;
     void main() {
-      float t = vUv.x;
-      vec3 col = mix(uA, uB, smoothstep(0.35, 1.0, t));
-      float alpha = clamp(t / 0.35, 0.0, 1.0);
-      // soften the long edges
-      alpha *= smoothstep(1.0, 0.45, abs(vUv.y * 2.0 - 1.0));
-      gl_FragColor = vec4(col, alpha);
+      float t = vUv.x;                       // along the needle, hub -> tip
+      float d = abs(vUv.y * 2.0 - 1.0);      // distance from the centerline
+      float lenA = smoothstep(0.04, 0.4, t); // fade in away from the hub
+      float core = smoothstep(0.16, 0.0, d) * (0.45 + 0.55 * t);
+      float glow = pow(max(0.0, 1.0 - d), 2.0) * uGlowK * (0.3 + 0.7 * t);
+      vec3 col = uCore * core + uGlow * glow;
+      gl_FragColor = vec4(col * lenA, 1.0);  // additive: black adds nothing
     }`,
 };
 
 const NEEDLE_COLORS = {
-  normal:    { a: hexRGB("#8a5cff"), b: hexRGB("#e6d8ff"), tip: hexRGB("#f0e8ff") },
-  penalized: { a: hexRGB("#ff8d6b"), b: hexRGB("#ffd0b8"), tip: hexRGB("#ffd0b8") },
+  normal:    { core: hexRGB("#f2efff"), glow: hexRGB("#5a3cff"), k: 0.55, w: 20, tip: hexRGB("#ffffff") },
+  penalized: { core: hexRGB("#ff6a48"), glow: hexRGB("#d61c0a"), k: 1.15, w: 34, tip: hexRGB("#ff5030") },
 };
 
 const pointShader = {
@@ -607,7 +703,24 @@ function buildScene() {
   stageTex.needsUpdate = true;
   bgMesh = spriteMesh(stageTex, 0);
   bgMesh.material.transparent = false;
+
+  // candle flames: warm glow halos; the flame body is a stream of rising
+  // additive particles emitted in update()
+  flameHalo1 = spriteMesh(TEX.glow, 2);
+  flameHalo1.material.blending = THREE.AdditiveBlending;
+  flameHalo1.material.color.setRGB(1.0, 0.55, 0.2);
+  flameHalo2 = spriteMesh(TEX.glow, 2);
+  flameHalo2.material.blending = THREE.AdditiveBlending;
+  flameHalo2.material.color.setRGB(1.0, 0.55, 0.2);
+  // white-hot vertical cores, the visible flame bodies
+  flameCore1 = spriteMesh(TEX.glow, 3);
+  flameCore1.material.blending = THREE.AdditiveBlending;
+  flameCore1.material.color.setRGB(1.0, 0.9, 0.62);
+  flameCore2 = spriteMesh(TEX.glow, 3);
+  flameCore2.material.blending = THREE.AdditiveBlending;
+  flameCore2.material.color.setRGB(1.0, 0.9, 0.62);
   slarkMesh = spriteMesh(TEX.slark, 10);
+  armMesh = spriteMesh(TEX.arm, 8); // behind slark: the sleeve tucks under his body
   TEX.slark.repeat.set(1 / SLARK_COLS, 1 / SLARK_ROWS);
   shankMesh = spriteMesh(TEX.shank, 20);
   lockMesh = spriteMesh(TEX.lock, 30);
@@ -619,7 +732,7 @@ function buildScene() {
         uRIn: { value: 0.6 }, uROut: { value: 100 },
         uLockSize: { value: 100 }, uLockC: { value: new THREE.Vector2(LOCK_CX_FRAC, LOCK_CY_FRAC) },
         uC0: { value: new THREE.Vector3() }, uC1: { value: new THREE.Vector3() },
-        uC2: { value: new THREE.Vector3() }, uRim: { value: new THREE.Vector3() },
+        uC2: { value: new THREE.Vector3() }, uBright: { value: 1 },
         uLockTex: { value: TEX.lock },
       },
       vertexShader: wedgeShader.vertexShader,
@@ -655,22 +768,34 @@ function buildScene() {
   ng.translate(0.5, 0, 0);
   needleMesh = new THREE.Mesh(ng, new THREE.ShaderMaterial({
     uniforms: {
-      uA: { value: new THREE.Vector3(...NEEDLE_COLORS.normal.a) },
-      uB: { value: new THREE.Vector3(...NEEDLE_COLORS.normal.b) },
+      uCore: { value: new THREE.Vector3(...NEEDLE_COLORS.normal.core) },
+      uGlow: { value: new THREE.Vector3(...NEEDLE_COLORS.normal.glow) },
+      uGlowK: { value: NEEDLE_COLORS.normal.k },
     },
     vertexShader: needleShader.vertexShader,
     fragmentShader: needleShader.fragmentShader,
     transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
   }));
   needleMesh.renderOrder = 50;
   scene.add(needleMesh);
 
-  tipMesh = new THREE.Mesh(new THREE.CircleGeometry(1, 24), new THREE.MeshBasicMaterial({
-    color: new THREE.Color(...NEEDLE_COLORS.normal.tip),
+  tipMesh = new THREE.Mesh(unitPlane, new THREE.MeshBasicMaterial({
+    map: TEX.glow, color: new THREE.Color(...NEEDLE_COLORS.normal.tip),
     transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
   }));
   tipMesh.renderOrder = 51;
+  tipMesh.material.blending = THREE.AdditiveBlending;
   scene.add(tipMesh);
+
+  // spark flash: the game's own flare sprite (yellowflare2, additive)
+  sparkMesh = new THREE.Mesh(unitPlane, new THREE.MeshBasicMaterial({
+    map: TEX.flare, transparent: true, depthTest: false, depthWrite: false,
+    side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+  }));
+  sparkMesh.renderOrder = 55;
+  sparkMesh.visible = false;
+  scene.add(sparkMesh);
 
   dialMesh = spriteMesh(TEX.dial, 60);
 }
@@ -686,10 +811,6 @@ function resize() {
   camera.left = 0; camera.right = W;
   camera.top = 0; camera.bottom = H;
   camera.updateProjectionMatrix();
-  if (composer) {
-    composer.setPixelRatio(dpr);
-    composer.setSize(W, H);
-  }
 
   const uiCanvas = ui.canvas;
   uiCanvas.width = W * dpr;
@@ -698,18 +819,19 @@ function resize() {
   uiCanvas.style.height = H + "px";
   ui.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  const aspect = Math.min(STAGE_ASPECT_MAX, Math.max(STAGE_ASPECT_MIN, W / H));
-  SH = Math.min(H, W / aspect);
-  SW = SH * aspect;
+  SH = Math.min(H, W / STAGE_ASPECT);
+  SW = SH * STAGE_ASPECT;
   SX = (W - SW) / 2;
   SY = (H - SH) / 2;
-  R_LOCK = SW * 0.33;                     // drawn radius of the lock face
+  R_LOCK = SW * 0.31;                     // drawn radius of the lock face (matches popup)
   R_HOLE = R_LOCK * HOLE_FRAC;
   R_WEDGE_OUT = R_HOLE * 0.99;
   R_DIAL = R_HOLE * 0.62;
   R_WEDGE_IN = R_DIAL * 1.01;
   CX = SX + SW / 2;
-  CY = SY + SH * 0.66;                    // lock low in the stage; sign and slark above
+  CY = SY + SH * 0.675;                   // lock low in the stage; sign and slark above
+  BTN_R = Math.max(22, SW * 0.045);       // buttons scale with the stage,
+  BTN_PAD = BTN_R * 0.62;                 // floored at a comfortable tap size
 
   if (assetsReady) layout();
 }
@@ -730,19 +852,50 @@ function layout() {
   bgMesh.scale.set(SW, SH, 1);
   bgMesh.position.set(CX, SY + SH / 2, 0);
 
+  // candle flames anchored over the painted candles in the bg art
+  // flame anchors user-calibrated via #calibrate mode (plus manual nudges):
+  // left (163,393), right (1050,286) in the 1200x1600 art
+  const fw = 210 * cs;
+  flameHalo1.scale.set(fw, fw, 1);
+  flameHalo1.position.set(CX + (163 - 600) * cs, SY + 399 * cs, 0);
+  flameHalo2.scale.set(fw, fw, 1);
+  flameHalo2.position.set(CX + (1050 - 600) * cs, SY + 292 * cs, 0);
+  flameCore1.scale.set(72 * cs, 130 * cs, 1);
+  flameCore1.position.set(CX + (163 - 600) * cs, SY + 393 * cs, 0);
+  flameCore2.scale.set(72 * cs, 130 * cs, 1);
+  flameCore2.position.set(CX + (1050 - 600) * cs, SY + 286 * cs, 0);
+  flameEmit = [
+    { x: CX + (163 - 600) * cs, y: SY + 417 * cs },
+    { x: CX + (1050 - 600) * cs, y: SY + 310 * cs },
+  ];
+  flameScale = cs;
+
   // slark is anchored in background-image coordinates so he stays in the
-  // prison window whatever the stage aspect (head 515px wide, chin at
-  // y=716 in the 1200x1600 art — identical to the old lock-relative
-  // placement at the desktop aspect)
-  const headW = 515 * cs;
+  // prison window whatever the stage aspect (head 460px wide, chin at
+  // y=560 in the 1200x1600 art — sized/raised to match the live game,
+  // where he sits back in the window above the shackle)
+  const headW = 295 * cs; // ~2/3, matches the in-game proportion
   const headH = headW * (500 / 420);
   slarkMesh.scale.set(headW, headH, 1);
-  slarkMesh.position.set(CX, SY + 716 * cs - headH / 2, 0);
+  slarkRestY = SY + 560 * cs - headH / 2;
+  slarkMesh.position.set(CX, slarkRestY, 0);
+
+  // his arm holding the pick, poking over the sill left of the lock; the
+  // art's shoulder pivot dot sits at the frame center, so rotating the
+  // mesh wiggles the pick naturally (anchored in bg-image coords)
+  // sized/anchored relative to the head so it stays attached at any slark
+  // scale. Drawn behind him: the shoulder pivot hides under his hood and
+  // only the hand + pick emerge beside his jaw, reaching to the sill
+  const armW = headW;
+  armMesh.scale.set(armW, armW, 1);
+  armRestY = SY + 560 * cs - headW * 0.15;
+  armMesh.position.set(CX - headW * 0.10, armRestY, 0);
 
   const shW = R_LOCK * 1.5;
   const shH = shW * (TEX.shank.image.height / TEX.shank.image.width);
   shankMesh.scale.set(shW, shH, 1);
-  shankMesh.position.set(CX, CY - R_LOCK * 0.55 - shH / 2, 0);
+  shankBaseY = CY - R_LOCK * 0.55 - shH / 2;
+  shankMesh.position.set(CX, shankBaseY, 0);
 
   const lockDrawW = R_LOCK / LOCK_R_FRAC;
   lockMesh.scale.set(lockDrawW, lockDrawW, 1);
@@ -759,9 +912,9 @@ function layout() {
     m.material.uniforms.uLockSize.value = lockDrawW;
   }
 
-  needleMesh.scale.set(R_WEDGE_OUT, 3.2, 1);
+  needleMesh.scale.set(R_WEDGE_OUT, NEEDLE_COLORS.normal.w, 1); // width per-state in syncScene
   needleMesh.position.set(CX, CY, 0);
-  tipMesh.scale.set(3, 3, 1);
+  tipMesh.scale.set(26, 26, 1); // softglow sprite: bright core with a wide halo
 
   dialMesh.scale.set(R_DIAL * 2, R_DIAL * 2, 1);
   dialMesh.position.set(CX, CY, 0);
@@ -773,6 +926,27 @@ function syncScene() {
   const frame = slarkReact > 0 ? 8 : (slarkBlink > 0 ? 1 : 0);
   const col = frame % SLARK_COLS, row = Math.floor(frame / SLARK_COLS);
   TEX.slark.offset.set(col / SLARK_COLS, row / SLARK_ROWS); // flipY=false: v=0 is sheet top
+
+  // arm idle wiggle around the shoulder pivot, plus a quick jitter on capture
+  const tNow = performance.now() / 1000;
+  armMesh.rotation.z = 0.5 + 0.08 * Math.sin(tNow * 1.7) + 0.18 * slarkReact * Math.sin(tNow * 22);
+
+  // slark bobs gently in the window; the arm rides along with him
+  const bob = Math.sin(tNow * 1.4) * SW * 0.005;
+  slarkMesh.position.y = slarkRestY + bob;
+  armMesh.position.y = armRestY + bob;
+
+  // candle halos + cores flicker gently, out of phase with each other
+  flameHalo1.material.opacity = 0.42 + 0.1 * Math.sin(tNow * 9.3) * Math.sin(tNow * 5.1);
+  flameHalo2.material.opacity = 0.42 + 0.1 * Math.sin(tNow * 8.1 + 2) * Math.sin(tNow * 4.7 + 1);
+  flameCore1.material.opacity = 0.85 + 0.12 * Math.sin(tNow * 11.7) * Math.sin(tNow * 6.3);
+  flameCore2.material.opacity = 0.85 + 0.12 * Math.sin(tNow * 10.9 + 1) * Math.sin(tNow * 5.9 + 2);
+  flameCore1.scale.y = 130 * flameScale * (1 + 0.07 * Math.sin(tNow * 13.1));
+  flameCore2.scale.y = 130 * flameScale * (1 + 0.07 * Math.sin(tNow * 12.3 + 1));
+
+  // shackle lifts and tilts open on a win
+  shankMesh.position.y = shankBaseY - shankPop * R_LOCK * 0.26;
+  shankMesh.rotation.z = shankPop * 0.18;
 
   // wedges
   for (let i = 0; i < wedgeMeshes.length; i++) {
@@ -786,7 +960,8 @@ function syncScene() {
       m.material.uniforms.uC0.value.set(...cset.c0);
       m.material.uniforms.uC1.value.set(...cset.c1);
       m.material.uniforms.uC2.value.set(...cset.c2);
-      m.material.uniforms.uRim.value.set(...cset.rim);
+      // very bright when fresh, darkening as the wedge shrinks away
+      m.material.uniforms.uBright.value = 0.5 + 0.75 * (a.half / a.half0);
     } else {
       m.visible = false;
     }
@@ -795,11 +970,27 @@ function syncScene() {
   // needle (world y is down; rotation.z is negated to keep math convention)
   needleMesh.rotation.z = -angle;
   const nc = missState !== 0 ? NEEDLE_COLORS.penalized : NEEDLE_COLORS.normal;
-  needleMesh.material.uniforms.uA.value.set(...nc.a);
-  needleMesh.material.uniforms.uB.value.set(...nc.b);
+  needleMesh.material.uniforms.uCore.value.set(...nc.core);
+  needleMesh.material.uniforms.uGlow.value.set(...nc.glow);
+  needleMesh.material.uniforms.uGlowK.value = nc.k;
+  needleMesh.scale.y = nc.w;
   tipMesh.position.set(CX + Math.cos(angle) * R_WEDGE_OUT,
                        CY - Math.sin(angle) * R_WEDGE_OUT, 0);
   tipMesh.material.color.setRGB(...nc.tip);
+
+  // brief spark star at the miss point, growing and fading
+  const SPARK_DUR = 0.28;
+  if (sparkT < SPARK_DUR) {
+    const k = sparkT / SPARK_DUR;
+    sparkMesh.visible = true;
+    sparkMesh.position.set(sparkX, sparkY, 0);
+    sparkMesh.rotation.z = sparkRot;
+    const scNow = R_LOCK * (0.32 + 0.28 * k);
+    sparkMesh.scale.set(scNow, scNow, 1);
+    sparkMesh.material.opacity = 1 - k;
+  } else {
+    sparkMesh.visible = false;
+  }
 
   // particles
   const pos = pointsGeom.attributes.position.array;
@@ -840,20 +1031,43 @@ function smallCaps(text, x, y, sizePx, color, spacing) {
   ui.textAlign = "center";
 }
 
+function drawFrame() {
+  const t = Math.max(5, SW * 0.014);
+  ui.strokeStyle = "#0e0b08";
+  ui.lineWidth = t;
+  ui.strokeRect(SX + t / 2, SY + t / 2, SW - t, SH - t);
+  ui.strokeStyle = "rgba(255,255,255,0.05)";
+  ui.lineWidth = 1;
+  ui.strokeRect(SX + t, SY + t, SW - 2 * t, SH - 2 * t);
+  // corner screws, barely lighter than the bezel
+  ui.fillStyle = "#221c15";
+  for (const [rx, ry] of [[SX + t, SY + t], [SX + SW - t, SY + t],
+                          [SX + t, SY + SH - t], [SX + SW - t, SY + SH - t]]) {
+    ui.beginPath();
+    ui.arc(rx, ry, t * 0.55, 0, TAU);
+    ui.fill();
+  }
+}
+
 function drawSign() {
-  const signW = SW * 0.6;
+  const signW = SW * 0.40; // matches the live game's sign-to-stage ratio
   const signH = signW * (signImg.height / signImg.width);
-  const signX = CX - signW / 2;
   const signY = SY - signH * 0.06; // chains run off the top of the stage
-  ui.drawImage(signImg, signX, signY, signW, signH);
+  // gentle sway on its chains, pivoting where they leave the stage top
+  const rock = 0.02 * Math.sin(performance.now() / 1000 * 0.9);
+  ui.save();
+  ui.translate(CX, signY);
+  ui.rotate(rock);
+  ui.drawImage(signImg, -signW / 2, 0, signW, signH);
   ui.textAlign = "center";
   ui.textBaseline = "middle";
   ui.font = `700 ${Math.round(signW * 0.085)}px ${FONT}`;
   ui.fillStyle = "#d9c18a";
   ui.shadowColor = "#000";
   ui.shadowBlur = 6;
-  ui.fillText("PICK THE LOCK", CX, signY + signH * 0.70);
+  ui.fillText("PICK THE LOCK", 0, signH * 0.70);
   ui.shadowBlur = 0;
+  ui.restore();
 }
 
 function drawUI() {
@@ -868,18 +1082,7 @@ function drawUI() {
     return;
   }
 
-  // rim flashes (hit/miss feedback) around the lock
-  for (const f of flashes) {
-    const k = 1 - f.age / 0.35;
-    ui.beginPath();
-    ui.arc(CX, CY, R_LOCK + 4 + 10 * k, 0, TAU);
-    ui.strokeStyle = f.color;
-    ui.globalAlpha = 0.45 * k;
-    ui.lineWidth = 8 + 10 * k;
-    ui.stroke();
-    ui.globalAlpha = 1;
-  }
-
+  drawFrame();
   drawSign();
 
   // center text: +bonus / TIME REMAINING / time / SCORE / score
@@ -890,7 +1093,7 @@ function drawUI() {
     for (const f of centerFloaters) {
       const k = f.age / 1.0;
       ui.globalAlpha = 1 - k;
-      ui.font = `700 ${Math.round(R_DIAL * 0.2)}px ${FONT}`;
+      ui.font = `600 ${Math.round(R_DIAL * 0.2)}px ${FONT_NUM}`;
       ui.fillStyle = f.color;
       ui.fillText(f.text, CX, CY - R_DIAL * 0.52 - k * 14);
       ui.globalAlpha = 1;
@@ -902,7 +1105,7 @@ function drawUI() {
     let timerColor = "#efe9dc";
     if (pulse > 0) timerColor = "#6effa1";
     else if (phase === "playing" && timeLeft < 5) timerColor = "#ff6b6b";
-    ui.font = `700 ${Math.round(R_DIAL * 0.5)}px ${FONT}`;
+    ui.font = `600 ${Math.round(R_DIAL * 0.5)}px ${FONT_NUM}`;
     ui.fillStyle = timerColor;
     ui.shadowColor = timerColor;
     ui.shadowBlur = pulse > 0 ? 22 * pulse : 6;
@@ -910,7 +1113,7 @@ function drawUI() {
     ui.shadowBlur = 0;
 
     smallCaps("SCORE", CX, CY + R_DIAL * 0.42, Math.round(R_DIAL * 0.11), "#8d8578", 2);
-    ui.font = `700 ${Math.round(R_DIAL * 0.22)}px ${FONT}`;
+    ui.font = `600 ${Math.round(R_DIAL * 0.22)}px ${FONT_NUM}`;
     ui.fillStyle = "#ffe98a";
     ui.fillText(score.toLocaleString(), CX, CY + R_DIAL * 0.66);
   }
@@ -928,27 +1131,23 @@ function drawUI() {
 
   // overlays
   if (phase === "menu") {
-    drawOverlayText(
-      "Left click when the needle is over a zone • blue zones give +1.5s",
-      "Hold right mouse to speed up • missing slows you down • R restarts",
-      "Click to start");
-    ui.font = `500 12px ${FONT}`;
-    ui.fillStyle = "rgba(200,190,170,0.5)";
-    ui.fillText("Fan recreation • Dota 2 art & audio © Valve Corporation • not affiliated with Valve",
-                CX, SY + SH - 14);
+    drawMenuOverlay();
   } else if (phase === "gameover") {
     drawOverlayText(
-      "Final score: " + score.toLocaleString(),
+      (won ? "Unlocked! " : "The lock holds\u2026 ") + "Final score: " + score.toLocaleString(),
       best > 0 ? "Best: " + best.toLocaleString() : "",
       restartLock > 0 ? "" : "Click or press R to play again");
-  } else {
-    ui.textAlign = "center";
-    ui.font = `500 13px ${FONT}`;
-    ui.fillStyle = "rgba(200,190,170,0.55)";
-    ui.fillText("LMB capture • hold RMB to speed up • R to restart", CX, SY + SH - 14);
   }
 
   drawButtons();
+
+  // disclaimer, always at the stage bottom
+  ui.textAlign = "center";
+  ui.textBaseline = "middle";
+  ui.font = `500 ${Math.max(7, Math.min(12, Math.round(SW * 0.016)))}px ${FONT}`;
+  ui.fillStyle = "rgba(200,190,170,0.5)";
+  ui.fillText("Fan recreation • Dota 2 art & audio © Valve Corporation • not affiliated with Valve",
+              CX, SY + SH - 12);
 }
 
 function drawRoundBtn(pos, glyph, active) {
@@ -960,7 +1159,7 @@ function drawRoundBtn(pos, glyph, active) {
   ui.strokeStyle = active ? "#ffe98a" : "#c9a94f";
   ui.stroke();
   ui.fillStyle = active ? "#1a1410" : "#d9c18a";
-  ui.font = "700 " + Math.round(BTN_R * 1.05) + "px " + FONT;
+  ui.font = "700 " + Math.round(BTN_R * (glyph.length > 1 ? 0.62 : 1.05)) + "px " + FONT;
   ui.textAlign = "center";
   ui.textBaseline = "middle";
   ui.fillText(glyph, pos.x, pos.y + 1);
@@ -969,11 +1168,88 @@ function drawButtons() {
   const b = buttonRects();
   drawRoundBtn(b.restart, "\u21bb", false);      // restart
   drawRoundBtn(b.boost, "\u00bb", boostLocked);  // boost lock
+  drawRoundBtn(b.music, "\u266a", musicOn);      // music + voice lines
+  drawRoundBtn(b.sfx, "FX", sfxOn);               // sound effects
+  for (const [pos, on] of [[b.music, musicOn], [b.sfx, sfxOn]]) {
+    if (on) continue;
+    ui.strokeStyle = "#c9a94f";
+    ui.lineWidth = 3;
+    ui.beginPath();
+    ui.moveTo(pos.x - BTN_R * 0.55, pos.y + BTN_R * 0.55);
+    ui.lineTo(pos.x + BTN_R * 0.55, pos.y - BTN_R * 0.55);
+    ui.stroke();
+  }
+}
+
+function drawMouseIcon(x, y, side, sz) {
+  const w = sz * 1.2, h = sz * 1.8;
+  ui.save();
+  ui.translate(x, y);
+  ui.fillStyle = "#45413a";
+  ui.beginPath();
+  ui.roundRect(-w / 2, -h / 2, w, h, w * 0.45);
+  ui.fill();
+  // highlighted button half
+  ui.fillStyle = "#e8ddc0";
+  ui.beginPath();
+  if (side === "L") ui.roundRect(-w / 2, -h / 2, w / 2 - 1, h * 0.45, [w * 0.45, 2, 2, 2]);
+  else ui.roundRect(1, -h / 2, w / 2 - 1, h * 0.45, [2, w * 0.45, 2, 2]);
+  ui.fill();
+  ui.restore();
+}
+
+function drawMenuOverlay() {
+  ui.fillStyle = "rgba(8,7,9,0.62)";
+  ui.fillRect(0, 0, W, H);
+  drawFrame();
+  drawSign();
+
+  const fs = Math.max(11, Math.round(SW * 0.024));
+  const lh = fs * 1.4;
+  const bx = CX - SW * 0.29;   // left edge of the text block
+  const tx = bx + fs * 2.4;    // indent for icon sections
+  let y = SY + SH * 0.30;
+
+  ui.textAlign = "left";
+  ui.textBaseline = "middle";
+  ui.fillStyle = "#cfc4a6";
+  ui.font = `500 ${fs}px ${FONT}`;
+  ui.fillText("Successfully pick the lock as many times", bx, y); y += lh;
+  ui.fillText("as you can before time runs out.", bx, y); y += lh * 1.7;
+
+  drawMouseIcon(bx + fs * 0.7, y, "L", fs);
+  ui.fillStyle = "#d9c18a";
+  ui.font = `700 ${fs}px ${FONT}`;
+  ui.fillText("PICK", tx, y); y += lh;
+  ui.fillStyle = "#cfc4a6";
+  ui.font = `500 ${fs}px ${FONT}`;
+  ui.fillText("Activate the lock pick when it", tx, y); y += lh;
+  ui.fillText("reaches the highlighted bar.", tx, y); y += lh * 1.5;
+  ui.fillText("Missing the bar briefly disables", tx, y); y += lh;
+  ui.fillText("the pick.", tx, y); y += lh * 1.5;
+  ui.fillText("Blue bars grant additional time.", tx, y); y += lh * 1.8;
+
+  drawMouseIcon(bx + fs * 0.7, y, "R", fs);
+  ui.fillStyle = "#d9c18a";
+  ui.font = `700 ${fs}px ${FONT}`;
+  ui.fillText("SPEED BOOST (HOLD)", tx, y); y += lh;
+  ui.fillStyle = "#cfc4a6";
+  ui.font = `500 ${fs}px ${FONT}`;
+  ui.fillText("Hold for continuous speed boost.", tx, y);
+
+  const blink = 0.6 + 0.4 * Math.sin(performance.now() / 300);
+  ui.globalAlpha = blink;
+  ui.textAlign = "center";
+  ui.font = `700 ${Math.round(R_LOCK * 0.09)}px ${FONT}`;
+  ui.fillStyle = "#ffe98a";
+  ui.fillText("Click to start", CX, SY + SH * 0.90);
+  ui.globalAlpha = 1;
 }
 
 function drawOverlayText(line1, line2, cta) {
   ui.fillStyle = "rgba(8,7,9,0.55)";
   ui.fillRect(0, 0, W, H);
+  drawFrame();
   drawSign(); // keep the title bright above the dim layer
 
   ui.textAlign = "center";
@@ -995,6 +1271,17 @@ function drawOverlayText(line1, line2, cta) {
 // ---------- Boot ----------
 const loader = new THREE.TextureLoader();
 async function loadAssets() {
+  // Radiance (UI) and RadianceM (digits) from the game files; if they fail
+  // to load we silently fall back to Georgia
+  try {
+    const faces = [
+      new FontFace("Radiance", 'url("assets/fonts/radiance-semibold.otf")', { weight: "100 900" }),
+      new FontFace("RadianceM", 'url("assets/fonts/radiancem-semibold.otf")', { weight: "100 900" }),
+    ];
+    await Promise.all(faces.map(f => f.load()));
+    faces.forEach(f => document.fonts.add(f));
+  } catch (e) {}
+
   const entries = Object.entries(TEX_NAMES);
   const texes = await Promise.all(entries.map(([k, src]) => loader.loadAsync(src)));
   entries.forEach(([k], i) => {
@@ -1008,10 +1295,6 @@ async function loadAssets() {
   if (!signImg.complete) await new Promise(res => { signImg.onload = res; signImg.onerror = res; });
 
   buildScene();
-  composer = new EffectComposer(renderer);
-  composer.addPass(new RenderPass(scene, camera));
-  bloomPass = new UnrealBloomPass(new THREE.Vector2(W, H), 0.45, 0.4, 0.62);
-  composer.addPass(bloomPass);
   assetsReady = true;
   resize(); // now that meshes exist, lay them out
 }
@@ -1028,7 +1311,7 @@ function frame(now) {
   update(dt);
   if (assetsReady) {
     syncScene();
-    composer.render();
+    renderer.render(scene, camera);
   }
   drawUI();
   requestAnimationFrame(frame);
