@@ -53,6 +53,58 @@ recovering, and the boost is forfeited. When the clock runs out the run ends:
 | Boost decay on release | ~2.5×/s |
 | Click grace beyond wedge edge | 2° |
 | Restart misclick guard after game over | 2 s (R and the ↻ button bypass it) |
+| Maximum run length | 180 s of simulated time (see below) |
+
+## Simulation
+
+The game proper lives in `engine.js`: a fixed-timestep, seeded, side-effect-free
+core. `index.html` drives and draws it but makes no gameplay decisions of its
+own. A run is fully described by **a seed plus a list of tick-stamped inputs**,
+so it can be replayed anywhere and reproduce the same score exactly — which is
+what lets a leaderboard verify a submitted run instead of trusting a number the
+client reports. A typical run's inputs encode to well under 200 bytes.
+
+Three properties hold that together, and breaking any of them breaks replay:
+
+- **Fixed 120 Hz timestep.** Wall-clock time only decides how many ticks to run,
+  so the game plays identically on a 60 Hz phone, a 120 Hz ProMotion screen and
+  a 144 Hz monitor; previously it did not, and a stuttering tab literally ran
+  the clock slow. A frame gap longer than 250 ms is dropped rather than
+  fast-forwarded, so a stalled tab loses simulated time instead of teleporting
+  the needle. 120 Hz divides evenly into the two common display rates, keeps the
+  input quantum (8.3 ms) well under human timing precision, and moves the needle
+  ~1° per tick at max boost so nearly-expired wedges stay hittable. The binding
+  constraint on going higher is server verification cost, not the client: a tick
+  is ~50 ns, but a worst-case run doubles from ~1 ms to ~2 ms of verifier CPU,
+  against a 10 ms budget per request on Cloudflare's free tier.
+- **Seeded randomness.** Wedge placement and the blue roll come from a seeded
+  integer PRNG. Cosmetic randomness (particles, voice lines, blinking) stays in
+  the host and never touches the sim. A leaderboard would have to issue seeds: a
+  client that picks its own seed can reroll until it gets a favourable board.
+- **No transcendental functions in the sim.** IEEE-754 pins `+ - * / %` and
+  `abs/min/max` to the last bit on every engine, but `Math.sin/asin` may differ
+  by an ULP between V8, SpiderMonkey and JSC — and one ULP can flip a hit into a
+  miss, failing an honest player's run. Constants derived from transcendentals
+  are written out as literals. Verified: a run recorded in Chrome replays
+  identically in Node and in JavaScriptCore, down to the full-precision duration.
+
+`MAX_RUN_TIME` (180 s) caps a run: past it, blue wedges still score but stop
+adding time. Comparing the ~0.36 s a capture is worth against the 0.3 s spawn
+floor suggests perfect play could extend a run forever, but that ignores the
+forced direction reversal on capture, which sends the needle back over cleared
+track and holds the achievable rate (~1.4 captures/s) under the ~2.75/s
+break-even. Measured over 500 seeds, optimal play ends by itself at a median of
+68 s and a maximum of 126 s. The cap is therefore a safety bound — it keeps a
+hostile trace from costing a verifier unbounded work — not a fix for a live
+exploit, and it sits above every measured run so it never truncates a real one.
+
+`engine.test.mjs` (`node engine.test.mjs`) guards all of this. Every finished
+run is also replayed in the browser and logged to the console if it diverges, so
+a change that quietly breaks determinism surfaces on the next run.
+
+There is no leaderboard and no ranked mode: the game is single-player and scores
+stay on the device. The replayability above exists so that adding one later is a
+matter of issuing seeds and verifying traces server-side, rather than a rewrite.
 
 ## Presentation
 

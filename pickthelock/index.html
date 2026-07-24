@@ -40,45 +40,28 @@ import * as THREE from "three";
 // Canvas 2D version (no sRGB/linear conversions to keep art colors identical).
 THREE.ColorManagement.enabled = false;
 
+// The game itself lives in engine.js: a fixed-timestep, seeded, side-effect-free
+// simulation. This file drives it and draws it, and owns everything the sim must
+// not know about — sound, particles, screens, input devices. It must never make a
+// gameplay decision of its own: a run has to stay reproducible from its seed and
+// its recorded inputs alone, because that is what lets a leaderboard verify it.
+import * as ENGINE from "./engine.js";
+
 const glCanvas = document.getElementById("gl");
 const ui = document.getElementById("ui").getContext("2d");
 
-// ---------- Tunables ----------
-// Values taken from Dota 2's scripts/events/dark_carnival/lockpicking/game.vdata
-// (CDOTALockpickingGameDefinition, TIME_ATTACK stage). Angles in degrees there,
-// converted to radians here.
-const DEG = Math.PI / 180;
-const START_TIME       = 30;          // m_flTimeLimit
-const HIT_SCORE        = 1000;        // m_nScorePerUnlock
-const BLUE_TIME_BONUS  = 1.5;         // m_flTimerIncreasePerUnlock
-const BASE_SPEED      = 40 * DEG;     // m_flInitialSpeed (deg/s)
-const MAX_SPEED_MULT  = 3.2;          // m_flMaxSpeedMultiplier (boost cap)
-const BOOST_RAMP      = 6 * 0.12 * 1.4; // m_flSpeedBoostRate * m_flSpeedBoostPercentage,
-                                      // scaled 1.4x by feel: multiplier compounds at ~1x/s
-                                      // while held, hitting the 3.2x cap in ~1.1s
-const BOOST_DECAY     = 2.5;          // release decay (not in vdata; tuned to feel snappy)
-const MISS_STALL      = 0.5;          // seconds crawling after a miss (not in vdata; tuned)
-const MISS_CRAWL      = BASE_SPEED * 0.35; // crawl speed while penalized, well below base
-const MISS_COOLDOWN   = 0.8;          // min seconds between misses (decoupled from the
-                                      // speed penalty so recovery can stay snappy)
-// Miss penalty: the needle instantly drops to a slow crawl for MISS_STALL
-// seconds, then accelerates quickly back up. (vdata has m_flDecelerationRate=3
-// / m_flRecoverRate=60 but the exact formulas are compiled; tuned by feel.)
-const RECOVER_ACCEL   = 460 * DEG;    // deg/s^2 back up to speed
-const WEDGE_SIZE      = 2 * Math.asin(40 / 180); // m_nUnlockRadius=40 is a circle radius in
-                                      // board units (m_nBoardRadius=180): ~25.7 deg of arc.
-                                      // Verified by measuring wedges in a gameplay screenshot
-                                      // (widest observed 23.5 deg, shrinking at 3 deg/s).
-const WEDGE_SHRINK    = 3 * DEG;      // m_flUnlockDegreeDecreaseRate (deg/s per side)
-const MIN_GAP         = 20 * DEG;     // m_flMinDegreesBetweenUnlocks (center-to-center)
-const SPAWN_BASE      = 1.4;          // m_flBaseUnlockAppearRate (s between spawns)
-const SPAWN_RAMP      = 0.04;         // m_flUnlockAppearIncreaseRate (interval shrink /s)
-const SPAWN_MIN       = 0.3;          // floor for the spawn interval
-const MAX_ARCS        = 6;            // m_nMaxUnlocksOnBoard
-const BLUE_BASE_CHANCE = 0.15;        // m_flTimerIncreaseUnlockChance (%)
-const BLUE_ESCALATION  = 0.04;        // m_flTimerIncreaseUnlockEscalatingChance (%/spawn)
-const NEEDLE_GRACE     = 2.0 * DEG;   // hit tolerance beyond wedge edges
-const WIN_SCORE        = 6000;        // observed minimum score for the lock to open
+// ---------- Simulation ----------
+// Every gameplay parameter, and the reasoning behind each one, lives in
+// engine.js and DESIGN.md. Nothing tunable belongs in this file.
+//
+// These are named imports rather than a destructure of the ENGINE namespace on
+// purpose: a name that engine.js doesn't export fails at load with an error
+// pointing straight at it, instead of quietly becoming undefined.
+import {
+  createRun, step, applyInput, drain, simulate, summary, sameResult,
+  encodeInputs, PICK, BOOST_ON, BOOST_OFF, MAX_ARCS, WEDGE_HALF, DT,
+} from "./engine.js";
+
 const TAU = Math.PI * 2;
 
 const FONT = '"Radiance", Georgia, "Times New Roman", serif';
@@ -169,19 +152,30 @@ const STAGE_ASPECT = 0.76;
 let W, H, SX, SY, SW, SH, CX, CY, R_LOCK, R_HOLE, R_DIAL, R_WEDGE_IN, R_WEDGE_OUT;
 
 // ---------- Game state ----------
+// `phase` is which screen we are on; the simulation only knows running vs over.
 let phase = "menu";           // menu | playing | gameover
-let timeLeft, score, elapsed;
-let angle, dir;               // needle angle (rad), direction (+1 ccw / -1 cw in math coords)
-let curSpeed;                 // actual needle speed (rad/s)
-let boostMult;                // 1..MAX_SPEED_MULT, ramps while RMB held
-let missState;                // 0 = normal, 2 = stalled, 3 = recovering
-let stallTimer;               // countdown for the full-stop dwell
-let blueChance;               // escalating pity chance for blue wedges
+let run;                      // the live simulation (engine.js)
+let trace = [];               // this run's inputs, stamped with the tick they land on
+let pending = [];             // inputs waiting for the next tick boundary
+let acc = 0;                  // wall-clock time not yet converted into ticks
+let boostSent = false;        // last boost state handed to the sim (edge detection)
+let lastRun = null;           // the finished run: seed, trace, result (see archiveRun)
+
+// Seeds are generated locally. If a leaderboard is ever added, submitted runs
+// will need theirs issued by the server instead — a client that picks its own
+// seed can keep rerolling until it gets a favourable board.
+function newSeed() {
+  const b = new Uint32Array(1);
+  crypto.getRandomValues(b);
+  return b[0] | 0;
+}
+run = createRun(newSeed());   // so the menu has a valid needle angle to draw
+
+// ---------- Presentation state ----------
+// None of this may feed back into the simulation.
 let fastHeld = false;
 let keyBoostHeld = false;     // S held: keyboard equivalent of RMB boost
-let spawnTimer;
-let arcs = [];                // {center, half, color}
-let centerFloaters = [];      // "+1.5" style popups on the dial {text, color, age}
+let centerFloaters = [];      // "+1.5" style popups on the dial {text, age}
 let sparkles = [];            // needle trail + capture bursts
                               // {x, y, vx, vy, age, life, size, color:[r,g,b], drag, grav}
 let displayScore = 0;         // rolls up continuously toward the real score
@@ -191,50 +185,12 @@ let restartLock = 0;          // seconds after losing during which clicks can't 
 let boostLocked = false;      // on-screen toggle equivalent to holding RMB
 try { boostLocked = localStorage.getItem("lockpick_boostlock") === "1"; } catch (e) {}
 let paused = false;           // P toggles during play
-let won = false;              // score >= WIN_SCORE when time ran out
 let shankPop = 0;             // 0 closed .. 1 pried open (win animation)
 let shankBaseY = 0;           // shackle rest position, set in layout()
 let slarkRestY = 0, armRestY = 0; // idle-bob rest positions, set in layout()
 let sparkT = 1e9;             // time since the last miss spark flash
 let sparkX = 0, sparkY = 0, sparkRot = 0;
 let shockT = 1e9;             // time since the last miss (shake + red wash)
-
-function reset() {
-  timeLeft = START_TIME;
-  score = 0;
-  elapsed = 0;
-  angle = Math.PI / 2; // needle starts at 12 o'clock like the original
-  dir = -1;            // and moves clockwise first, like the original
-  curSpeed = BASE_SPEED;
-  boostMult = 1;
-  missState = 0;
-  stallTimer = 0;
-  blueChance = BLUE_BASE_CHANCE;
-  spawnTimer = 0.4;
-  arcs = [];
-  centerFloaters = [];
-  sparkles = [];
-  displayScore = 0;
-  won = false;
-  paused = false;
-  shankPop = 0;
-  sparkT = 1e9;
-  shockT = 1e9;
-  // boostLocked deliberately survives restarts
-}
-
-// ---------- Angle helpers ----------
-function norm(a) {
-  a %= TAU;
-  return a < 0 ? a + TAU : a;
-}
-function angDist(a, b) {
-  const d = Math.abs(norm(a) - norm(b));
-  return Math.min(d, TAU - d);
-}
-function needleOnArc(arc) {
-  return angDist(angle, arc.center) <= arc.half + NEEDLE_GRACE;
-}
 
 function hexRGB(hex) {
   const n = parseInt(hex.slice(1), 16);
@@ -290,38 +246,25 @@ function spawnMissBurst(ang) {
   }
 }
 
-// ---------- Spawning ----------
-function trySpawnArc() {
-  if (arcs.length >= MAX_ARCS) return;
-  const half = WEDGE_SIZE / 2;
-  for (let attempt = 0; attempt < 12; attempt++) {
-    const center = Math.random() * TAU;
-    // keep new wedges from spawning right under the needle
-    if (angDist(center, angle) < half + 0.25) continue;
-    let clear = true;
-    for (const a of arcs) {
-      // MIN_GAP is center-to-center (wedges may spawn touching edge-to-edge);
-      // the max() only prevents actual overlap with wider neighbors
-      if (angDist(center, a.center) < Math.max(half + a.half, MIN_GAP)) { clear = false; break; }
-    }
-    if (clear) {
-      // escalating pity: each yellow spawn raises the blue chance until one lands
-      const isBlue = Math.random() < blueChance;
-      blueChance = isBlue ? BLUE_BASE_CHANCE : blueChance + BLUE_ESCALATION;
-      arcs.push({ center, half, half0: half, color: isBlue ? "blue" : "yellow",
-                  phase: Math.random() * TAU });
-      return;
-    }
-  }
-}
-
 // ---------- Input ----------
 glCanvas.addEventListener("contextmenu", e => e.preventDefault());
 
 function startRun() {
-  reset();
+  run = createRun(newSeed());
+  trace = [];
+  pending = [];
+  acc = 0;
+  boostSent = false;          // syncBoost re-sends the live boost state on tick 0
+  displayScore = 0;
+  centerFloaters = [];
+  sparkles = [];
+  paused = false;
+  shankPop = 0;
+  sparkT = 1e9;
+  shockT = 1e9;
   phase = "playing";
   startMusic();
+  // boostLocked deliberately survives restarts
 }
 
 // on-screen corner buttons (mobile): restart bottom-left, boost-lock bottom-right,
@@ -354,47 +297,29 @@ function pressButton(name) {
   if (boostLocked && !paused && !fastHeld && !keyBoostHeld) playSfx("boost", 0.45);
 }
 
+// Everything the player does during a run becomes a recorded input. The host
+// never reaches into the simulation directly, and never decides an outcome.
+function queueInput(code) {
+  pending.push(code);
+}
+
+// Boost is held state assembled from three sources (RMB, S, the lock toggle),
+// so it reaches the sim as edges rather than as a poll.
+function syncBoost() {
+  const held = fastHeld || keyBoostHeld || boostLocked;
+  if (held === boostSent) return;
+  boostSent = held;
+  queueInput(held ? BOOST_ON : BOOST_OFF);
+}
+
 function primaryAction() {
-  if (phase === "playing" && paused) return; // no picks while paused
-  if (phase === "menu" || phase === "gameover") {
-    if (phase === "gameover" && restartLock > 0) return; // misclick guard
-    startRun();
+  if (phase === "playing") {
+    if (paused) return;       // no picks while paused
+    queueInput(PICK);         // the sim decides capture vs miss
     return;
   }
-
-  // primary press during play: try to capture
-  let hitIndex = -1;
-  for (let i = 0; i < arcs.length; i++) {
-    if (needleOnArc(arcs[i])) { hitIndex = i; break; }
-  }
-  if (hitIndex >= 0) {
-    const arc = arcs[hitIndex];
-    score += HIT_SCORE;
-    playSfx("success", 0.6);
-    if (arc.color === "blue") {
-      timeLeft += BLUE_TIME_BONUS;
-      centerFloaters.push({ text: "+" + BLUE_TIME_BONUS.toFixed(1), age: 0 });
-    }
-    dir = -dir;      // reverse direction, same speed
-    missState = 0;   // capturing clears any slow penalty
-    curSpeed = BASE_SPEED * boostMult;
-    spawnBurst(angle, arc.color);
-    slarkReact = 0.35;
-    arcs.splice(hitIndex, 1);
-  } else {
-    // miss: instant drop to a crawl, brief hold, then quick recovery.
-    // Boost is forfeited — it must recompound from 1x after recovery.
-    // Clicks during an active penalty or within the cooldown are ignored,
-    // so failures can't chain faster than MISS_COOLDOWN
-    if (missState !== 0 || shockT < MISS_COOLDOWN) return;
-    curSpeed = MISS_CRAWL;
-    missState = 2;
-    stallTimer = MISS_STALL;
-    boostMult = 1;
-    playSfx("miss", 0.6);
-    spawnMissBurst(angle);
-    shockT = 0;
-  }
+  if (phase === "gameover" && restartLock > 0) return; // misclick guard
+  startRun();
 }
 
 // #calibrate mode: click anywhere to read background-image coordinates
@@ -455,6 +380,7 @@ window.addEventListener("keydown", e => {
   if ((e.key === "p" || e.key === "P") && phase === "playing") {
     paused = !paused;
     if (musicEl) { if (paused) musicEl.pause(); else musicEl.play().catch(() => {}); }
+    if (!paused) acc = 0;     // don't bank the wall-clock time spent paused
   }
   if ((e.key === "s" || e.key === "S") && !e.repeat) {
     if (!fastHeld && !keyBoostHeld && !boostLocked && phase === "playing" && !paused) {
@@ -468,9 +394,10 @@ window.addEventListener("keydown", e => {
   }
 });
 
-// ---------- Update ----------
-function update(dt) {
-  // effects keep animating even on menu/gameover screens
+// ---------- Presentation update ----------
+// Runs on wall-clock time, every frame, on every screen. Nothing here is
+// allowed to touch the simulation.
+function stepFx(dt) {
   for (let i = centerFloaters.length - 1; i >= 0; i--) {
     centerFloaters[i].age += dt;
     if (centerFloaters[i].age > 1.0) centerFloaters.splice(i, 1);
@@ -490,11 +417,11 @@ function update(dt) {
   restartLock = Math.max(0, restartLock - dt);
 
   // score counter rolls up smoothly (~0.25s per capture)
-  if (displayScore < score) {
-    displayScore = Math.min(score,
-      displayScore + Math.max(2500, (score - displayScore) * 4) * dt);
-  } else if (displayScore > score) {
-    displayScore = score;
+  if (displayScore < run.score) {
+    displayScore = Math.min(run.score,
+      displayScore + Math.max(2500, (run.score - displayScore) * 4) * dt);
+  } else if (displayScore > run.score) {
+    displayScore = run.score;
   }
 
   // candle flames: continuous stream of rising, shrinking warm particles
@@ -517,11 +444,29 @@ function update(dt) {
     }
   }
 
+  // needle sparkle trail: emitted per frame rather than per tick, so its
+  // density doesn't change with the simulation rate
+  if (phase === "playing" && !paused) {
+    for (let i = 0; i < 2; i++) {
+      const rr = R_DIAL * 0.3 + Math.random() * (R_WEDGE_OUT - R_DIAL * 0.3);
+      const jitter = (Math.random() - 0.5) * 0.05;
+      sparkles.push({
+        x: CX + Math.cos(run.angle + jitter) * rr,
+        y: CY - Math.sin(run.angle + jitter) * rr,
+        vx: (Math.random() - 0.5) * 20,
+        vy: (Math.random() - 0.5) * 20,
+        age: 0, life: 0.5,
+        size: 3.2, color: TRAIL_COLOR,
+        drag: 0, grav: 0,
+      });
+    }
+  }
+
   sparkT += dt;
   shockT += dt;
 
   // shackle pries open on a win
-  const popTarget = (phase === "gameover" && won) ? 1 : 0;
+  const popTarget = (phase === "gameover" && run.won) ? 1 : 0;
   shankPop += (popTarget - shankPop) * Math.min(1, dt * 6);
 
   // slark idle blinking
@@ -532,80 +477,99 @@ function update(dt) {
     slarkBlink = 0.13;
     slarkNext = 2 + Math.random() * 3;
   }
+}
 
-  if (phase !== "playing" || paused) return;
+// ---------- Simulation driver ----------
+// The sim only ever advances in whole fixed ticks, so the game plays identically
+// at 60Hz and 144Hz and a recorded run replays exactly. Wall-clock time decides
+// how many ticks to run and nothing else.
+const MAX_CATCHUP = 0.25;     // seconds of simulation per frame: a longer stall
+                              // (tab switch, GC pause) is dropped rather than
+                              // fast-forwarded through
 
-  elapsed += dt;
-  timeLeft -= dt;
-  if (timeLeft <= 0) {
-    timeLeft = 0;
-    phase = "gameover";
-    best = Math.max(best, score);
-    try { localStorage.setItem("lockpick_best", String(best)); } catch (e) {}
-    restartLock = 2; // ignore stray clicks right after the game ends (R still works)
-    won = score >= WIN_SCORE;
-    stopMusic();
-    playFile(won ? WIN_STINGER
-                 : LOSE_STINGERS[(Math.random() * LOSE_STINGERS.length) | 0], 0.5);
-    const vo = won ? WIN_VO : LOSE_VO;
-    setTimeout(() => playFile(vo[(Math.random() * vo.length) | 0], 0.7), 600);
-    return;
-  }
-
-  // boost multiplier compounds while RMB is held, decays when released.
-  // It is pinned at 1x for the duration of the miss penalty.
-  if (missState === 0) {
-    if (fastHeld || keyBoostHeld || boostLocked) {
-      boostMult = Math.min(MAX_SPEED_MULT, boostMult * (1 + BOOST_RAMP * dt));
-    } else {
-      boostMult = Math.max(1, boostMult * (1 - BOOST_DECAY * dt));
+function stepSim(wall) {
+  syncBoost();
+  acc += Math.min(wall, MAX_CATCHUP);
+  while (acc >= DT) {
+    acc -= DT;
+    // inputs land on a tick boundary and are stamped with that tick, so the
+    // replay applies them at exactly the same moment
+    for (let i = 0; i < pending.length; i++) {
+      trace.push({ t: run.tick, a: pending[i] });
+      applyInput(run, pending[i]);
     }
-  }
-  const targetSpeed = BASE_SPEED * boostMult;
-
-  if (missState === 2) {
-    // crawl well below base speed so the miss reads clearly
-    stallTimer -= dt;
-    if (stallTimer <= 0) missState = 3;
-  } else if (missState === 3) {
-    // constant acceleration back up to speed
-    curSpeed += RECOVER_ACCEL * dt;
-    if (curSpeed >= targetSpeed) { curSpeed = targetSpeed; missState = 0; }
-  } else {
-    curSpeed = targetSpeed;
-  }
-  angle = norm(angle + dir * curSpeed * dt);
-
-  // needle sparkle trail
-  for (let i = 0; i < 2; i++) {
-    const rr = R_DIAL * 0.3 + Math.random() * (R_WEDGE_OUT - R_DIAL * 0.3);
-    const jitter = (Math.random() - 0.5) * 0.05;
-    sparkles.push({
-      x: CX + Math.cos(angle + jitter) * rr,
-      y: CY - Math.sin(angle + jitter) * rr,
-      vx: (Math.random() - 0.5) * 20,
-      vy: (Math.random() - 0.5) * 20,
-      age: 0, life: 0.5,
-      size: 3.2, color: TRAIL_COLOR,
-      drag: 0, grav: 0,
-    });
-  }
-
-  // wedges shrink and expire (WEDGE_SHRINK deg/s per side, so a fresh
-  // wedge lasts ~4.3s — matches the original's faster decay)
-  for (let i = arcs.length - 1; i >= 0; i--) {
-    const a = arcs[i];
-    a.half -= WEDGE_SHRINK * dt;
-    if (a.half <= 0.25 * DEG) arcs.splice(i, 1); // sliver-thin before vanishing
-  }
-
-  // spawn rate ramps up over time
-  spawnTimer -= dt;
-  if (spawnTimer <= 0) {
-    trySpawnArc();
-    spawnTimer = Math.max(SPAWN_MIN, SPAWN_BASE - elapsed * SPAWN_RAMP);
+    pending.length = 0;
+    step(run);
+    handleEvents(drain(run));
+    if (run.over) { finishRun(); return; }
   }
 }
+
+// Sim events become sound and particles here. This is the only direction
+// information is allowed to flow.
+function handleEvents(events) {
+  for (const e of events) {
+    if (e.k === "capture") {
+      playSfx("success", 0.6);
+      spawnBurst(e.angle, e.color);
+      slarkReact = 0.35;
+    } else if (e.k === "bonus") {
+      centerFloaters.push({ text: "+" + e.amount.toFixed(1), age: 0 });
+    } else if (e.k === "miss") {
+      playSfx("miss", 0.6);
+      spawnMissBurst(e.angle);
+      shockT = 0;
+    }
+  }
+}
+
+function finishRun() {
+  phase = "gameover";
+  acc = 0;
+  pending.length = 0;
+  best = Math.max(best, run.score);
+  try { localStorage.setItem("lockpick_best", String(best)); } catch (e) {}
+  restartLock = 2; // ignore stray clicks right after the game ends (R still works)
+  stopMusic();
+  playFile(run.won ? WIN_STINGER
+                   : LOSE_STINGERS[(Math.random() * LOSE_STINGERS.length) | 0], 0.5);
+  const vo = run.won ? WIN_VO : LOSE_VO;
+  setTimeout(() => playFile(vo[(Math.random() * vo.length) | 0], 0.7), 600);
+  archiveRun();
+}
+
+// Re-simulate the run that just finished, from its seed and recorded inputs
+// only, and check it lands on the same score. Nothing in the game depends on
+// this, but it continuously proves the property a leaderboard would rest on —
+// that a run is reproducible from seed + trace alone — so a change that quietly
+// breaks determinism shows up here on the very next run instead of much later.
+function archiveRun() {
+  const result = summary(run);
+  lastRun = { seed: run.seed, inputs: encodeInputs(trace), result, verified: false };
+  try {
+    const replay = simulate(lastRun.seed, lastRun.inputs);
+    lastRun.verified = sameResult(result, replay);
+    if (!lastRun.verified) {
+      console.error("[pickthelock] replay diverged from the live run",
+                    { live: result, replay });
+    }
+  } catch (err) {
+    console.error("[pickthelock] replay failed", err);
+  }
+}
+
+// Automation handle, used by the browser-side determinism test. Exposing it
+// costs nothing: the leaderboard's threat model already assumes the player
+// controls the client completely, which is the whole reason runs are verified
+// server-side from the seed and inputs rather than trusted from a score.
+window.__lockpick = {
+  ENGINE,
+  get phase() { return phase; },
+  get run() { return run; },
+  get lastRun() { return lastRun; },
+  start: startRun,
+  pick: () => queueInput(PICK),
+};
 
 // ---------- Three.js scene ----------
 const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true });
@@ -745,7 +709,7 @@ function buildScene() {
   bgMesh.material.transparent = false;
 
   // candle flames: warm glow halos; the flame body is a stream of rising
-  // additive particles emitted in update()
+  // additive particles emitted in stepFx()
   flameHalo1 = spriteMesh(TEX.glow, 2);
   flameHalo1.material.blending = THREE.AdditiveBlending;
   flameHalo1.material.color.setRGB(1.0, 0.55, 0.2);
@@ -1004,8 +968,8 @@ function syncScene() {
   // wedges
   for (let i = 0; i < wedgeMeshes.length; i++) {
     const m = wedgeMeshes[i];
-    if (i < arcs.length) {
-      const a = arcs[i];
+    if (i < run.arcs.length) {
+      const a = run.arcs[i];
       const cset = WEDGE_COLORS[a.color];
       m.visible = true;
       m.material.uniforms.uCenter.value = a.center;
@@ -1014,9 +978,11 @@ function syncScene() {
       m.material.uniforms.uC1.value.set(...cset.c1);
       m.material.uniforms.uC2.value.set(...cset.c2);
       // very bright when fresh, darkening as the wedge shrinks away;
-      // blue (time) wedges additionally pulsate their intensity
-      let bright = 0.65 + 0.8 * (a.half / a.half0);
-      if (a.color === "blue") bright *= 1.08 + 0.2 * Math.sin(tNow * 5.5 + a.phase);
+      // blue (time) wedges additionally pulsate their intensity. The pulse
+      // phase comes off the wedge id by the golden angle so neighbours stay out
+      // of step without the simulation spending randomness on decoration.
+      let bright = 0.65 + 0.8 * (a.half / WEDGE_HALF);
+      if (a.color === "blue") bright *= 1.08 + 0.2 * Math.sin(tNow * 5.5 + a.id * 2.39996);
       m.material.uniforms.uBright.value = bright;
     } else {
       m.visible = false;
@@ -1024,14 +990,14 @@ function syncScene() {
   }
 
   // needle (world y is down; rotation.z is negated to keep math convention)
-  needleMesh.rotation.z = -angle;
-  const nc = missState !== 0 ? NEEDLE_COLORS.penalized : NEEDLE_COLORS.normal;
+  needleMesh.rotation.z = -run.angle;
+  const nc = run.missState !== 0 ? NEEDLE_COLORS.penalized : NEEDLE_COLORS.normal;
   needleMesh.material.uniforms.uCore.value.set(...nc.core);
   needleMesh.material.uniforms.uGlow.value.set(...nc.glow);
   needleMesh.material.uniforms.uGlowK.value = nc.k;
   needleMesh.scale.y = nc.w;
-  tipMesh.position.set(CX + Math.cos(angle) * R_WEDGE_OUT,
-                       CY - Math.sin(angle) * R_WEDGE_OUT, 0);
+  tipMesh.position.set(CX + Math.cos(run.angle) * R_WEDGE_OUT,
+                       CY - Math.sin(run.angle) * R_WEDGE_OUT, 0);
   tipMesh.material.color.setRGB(...nc.tip);
 
   // brief spark star at the miss point, growing and fading
@@ -1159,7 +1125,7 @@ function drawUI() {
     const tSize = Math.round(R_DIAL * 0.5);
     ui.font = `600 ${tSize}px ${FONT_NUM}`;
     ui.fillStyle = vGradText(timerTop, timerBot, CY + R_DIAL * 0.06, tSize);
-    ui.fillText(timeLeft.toFixed(1), CX, CY + R_DIAL * 0.06);
+    ui.fillText(run.timeLeft.toFixed(1), CX, CY + R_DIAL * 0.06);
 
     smallCaps("SCORE", CX, CY + R_DIAL * 0.42, Math.round(R_DIAL * 0.11), "#b59a63", 2);
     const sSize = Math.round(R_DIAL * 0.22);
@@ -1193,7 +1159,7 @@ function drawUI() {
     ui.fillText("Press P to resume", CX, CY + R_LOCK * 0.08);
   } else if (phase === "gameover") {
     drawOverlayText(
-      (won ? "Unlocked! " : "The lock holds\u2026 ") + "Final score: " + score.toLocaleString(),
+      (run.won ? "Unlocked! " : "The lock holds\u2026 ") + "Final score: " + run.score.toLocaleString(),
       best > 0 ? "Best: " + best.toLocaleString() : "",
       restartLock > 0 ? "" : "Click or press R to play again");
   }
@@ -1444,16 +1410,17 @@ async function loadAssets() {
   resize(); // now that meshes exist, lay them out
 }
 
-reset(); // initialize state so the first frame has a valid needle angle
-if (location.hash === "#autostart") startRun(); // for automated screenshots/testing
+// `run` was created at module load, so the menu already has a needle to draw
+if (location.hash.includes("autostart")) startRun(); // for automated screenshots/testing
 resize();
 loadAssets();
 
 let lastT = performance.now();
 function frame(now) {
-  const dt = Math.max(0, Math.min((now - lastT) / 1000, 0.05)); // clamp tab-switch jumps / non-monotonic timestamps
+  const wall = Math.max(0, (now - lastT) / 1000);
   lastT = now;
-  update(dt);
+  if (phase === "playing" && !paused) stepSim(wall);
+  stepFx(Math.min(wall, MAX_CATCHUP));
   if (assetsReady) {
     syncScene();
     renderer.render(scene, camera);
