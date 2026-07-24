@@ -59,6 +59,8 @@ const BOOST_RAMP      = 6 * 0.12 * 1.4; // m_flSpeedBoostRate * m_flSpeedBoostPe
 const BOOST_DECAY     = 2.5;          // release decay (not in vdata; tuned to feel snappy)
 const MISS_STALL      = 0.5;          // seconds crawling after a miss (not in vdata; tuned)
 const MISS_CRAWL      = BASE_SPEED * 0.35; // crawl speed while penalized, well below base
+const MISS_COOLDOWN   = 0.8;          // min seconds between misses (decoupled from the
+                                      // speed penalty so recovery can stay snappy)
 // Miss penalty: the needle instantly drops to a slow crawl for MISS_STALL
 // seconds, then accelerates quickly back up. (vdata has m_flDecelerationRate=3
 // / m_flRecoverRate=60 but the exact formulas are compiled; tuned by feel.)
@@ -373,9 +375,9 @@ function primaryAction() {
   } else {
     // miss: instant drop to a crawl, brief hold, then quick recovery.
     // Boost is forfeited — it must recompound from 1x after recovery.
-    // Clicks during an active penalty are ignored (no vdata cooldown param
-    // exists; the penalty itself is the minimum interval between misses).
-    if (missState !== 0) return;
+    // Clicks during an active penalty or within the cooldown are ignored,
+    // so failures can't chain faster than MISS_COOLDOWN
+    if (missState !== 0 || shockT < MISS_COOLDOWN) return;
     curSpeed = MISS_CRAWL;
     missState = 2;
     stallTimer = MISS_STALL;
