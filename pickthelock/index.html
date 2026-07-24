@@ -61,7 +61,7 @@ const MISS_CRAWL      = BASE_SPEED * 0.35; // crawl speed while penalized, well 
 // Miss penalty: the needle instantly drops to a slow crawl for MISS_STALL
 // seconds, then accelerates quickly back up. (vdata has m_flDecelerationRate=3
 // / m_flRecoverRate=60 but the exact formulas are compiled; tuned by feel.)
-const RECOVER_ACCEL   = 320 * DEG;    // deg/s^2 back up to speed
+const RECOVER_ACCEL   = 460 * DEG;    // deg/s^2 back up to speed
 const WEDGE_SIZE      = 2 * Math.asin(40 / 180); // m_nUnlockRadius=40 is a circle radius in
                                       // board units (m_nBoardRadius=180): ~25.7 deg of arc.
                                       // Verified by measuring wedges in a gameplay screenshot
@@ -235,8 +235,8 @@ function hexRGB(hex) {
 
 // spark burst at the needle's position on the ring when a wedge is captured
 const BURST_PALETTES = {
-  blue:   ["#6fc3ff", "#a8dcff", "#ffffff", "#3fa9ff"].map(hexRGB),
-  yellow: ["#ffdf6b", "#ffc93f", "#ffffff", "#ffb347"].map(hexRGB),
+  blue:   ["#6fc3ff", "#a8dcff", "#ffffff", "#3fa9ff"].map(h => hexRGB(h).map(c => c * 1.35)),
+  yellow: ["#ffdf6b", "#ffc93f", "#ffffff", "#ffb347"].map(h => hexRGB(h).map(c => c * 1.35)),
 };
 const TRAIL_COLOR = hexRGB("#b48cff");
 const FLAME_PALETTE = ["#fff3c8", "#ffd23f", "#ffa02e", "#ff7a1a"].map(hexRGB);
@@ -245,14 +245,14 @@ function spawnBurst(ang, color) {
   const bx = CX + Math.cos(ang) * r0;
   const by = CY - Math.sin(ang) * r0;
   const palette = BURST_PALETTES[color];
-  for (let i = 0; i < 34; i++) {
+  for (let i = 0; i < 46; i++) {
     const a = Math.random() * TAU;
-    const sp = 60 + Math.random() * 260;
+    const sp = 70 + Math.random() * 330;
     sparkles.push({
       x: bx, y: by,
       vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
-      age: 0, life: 0.45 + Math.random() * 0.45,
-      size: 3 + Math.random() * 4.5,
+      age: 0, life: 0.5 + Math.random() * 0.5,
+      size: 4.5 + Math.random() * 6,
       color: palette[(Math.random() * palette.length) | 0],
       drag: 2.5, grav: 140,
     });
@@ -693,7 +693,8 @@ const pointShader = {
     void main() {
       float d = length(gl_PointCoord - 0.5);
       float a = vAlpha * smoothstep(0.5, 0.12, d);
-      gl_FragColor = vec4(vColor * a, a);
+      float core = vAlpha * smoothstep(0.16, 0.0, d); // white-hot center
+      gl_FragColor = vec4(vColor * a + vec3(1.0) * core * 0.85, a);
     }`,
 };
 
