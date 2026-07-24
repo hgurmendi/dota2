@@ -27,6 +27,9 @@ belongs to (exact from vdata / interpreted / tuned by feel).
   units. Headless Chrome enforces a ~500px minimum window width, so
   narrow-viewport screenshots lay out wider than requested.
 - `canvas2d.html` is a frozen pre-Three.js version; don't extend it.
+- localStorage keys: `lockpick_sfx`, `lockpick_music`,
+  `lockpick_boostlock` (preference toggles), `lockpick_best`
+  (high score).
 
 ## Assets
 

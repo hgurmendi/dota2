@@ -66,7 +66,8 @@ recovering, and the boost is forfeited. When the clock runs out the run ends:
   RadianceM for text; music, stingers, and Slark voice lines for audio).
 - Inputs: LMB/tap/Space = pick, RMB/S hold = boost, T or the on-screen
   toggle = boost lock, R / ↻ = restart, P = pause. Separate mute toggles
-  for effects and music/voice.
+  for effects and music/voice. The mute toggles, the boost lock, and the
+  best score persist in localStorage; the menu shows the personal best.
 
 ## Attribution
 

@@ -186,8 +186,10 @@ let sparkles = [];            // needle trail + capture bursts
                               // {x, y, vx, vy, age, life, size, color:[r,g,b], drag, grav}
 let displayScore = 0;         // rolls up continuously toward the real score
 let best = 0;
+try { best = parseInt(localStorage.getItem("lockpick_best"), 10) || 0; } catch (e) {}
 let restartLock = 0;          // seconds after losing during which clicks can't restart
 let boostLocked = false;      // on-screen toggle equivalent to holding RMB
+try { boostLocked = localStorage.getItem("lockpick_boostlock") === "1"; } catch (e) {}
 let paused = false;           // P toggles during play
 let won = false;              // score >= WIN_SCORE when time ran out
 let shankPop = 0;             // 0 closed .. 1 pried open (win animation)
@@ -348,6 +350,7 @@ function pressButton(name) {
   if (name === "music") { setMusic(!musicOn); return; }
   if (name === "sfx") { setSfx(!sfxOn); return; }
   boostLocked = !boostLocked;
+  try { localStorage.setItem("lockpick_boostlock", boostLocked ? "1" : "0"); } catch (e) {}
   if (boostLocked && !paused && !fastHeld && !keyBoostHeld) playSfx("boost", 0.45);
 }
 
@@ -538,6 +541,7 @@ function update(dt) {
     timeLeft = 0;
     phase = "gameover";
     best = Math.max(best, score);
+    try { localStorage.setItem("lockpick_best", String(best)); } catch (e) {}
     restartLock = 2; // ignore stray clicks right after the game ends (R still works)
     won = score >= WIN_SCORE;
     stopMusic();
@@ -1367,6 +1371,17 @@ function drawMenuOverlay() {
     "RESTART", ["Restart the run at any time."]);
   section([{ type: "key", label: "P" }],
     "PAUSE", ["Pause and resume the run."]);
+
+  if (best > 0) {
+    // personal best above the CTA (letters fall back to Radiance, digits
+    // render in RadianceM via the font stack)
+    ui.textAlign = "center";
+    ui.textBaseline = "middle";
+    const bSize = Math.round(SW * 0.026);
+    ui.font = `600 ${bSize}px ${FONT_NUM}`;
+    ui.fillStyle = vGradText("#eeda9f", "#8b8cc4", SY + SH * 0.85, bSize);
+    ui.fillText("BEST  " + best.toLocaleString(), CX, SY + SH * 0.85);
+  }
 
   const blink = 0.6 + 0.4 * Math.sin(performance.now() / 300);
   ui.globalAlpha = blink;
