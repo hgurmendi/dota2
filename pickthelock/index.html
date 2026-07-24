@@ -699,8 +699,10 @@ const pointShader = {
 };
 
 function buildScene() {
-  // dimmed copy of the art cover-filling the whole viewport behind the stage
-  backdropMesh = spriteMesh(TEX.bg, -1);
+  // dimmed, magnified copy of the stage scene filling the whole viewport
+  const backdropTex = TEX.bg.clone();
+  backdropTex.needsUpdate = true;
+  backdropMesh = spriteMesh(backdropTex, -1);
   backdropMesh.material.transparent = false;
   backdropMesh.material.color.setScalar(0.22);
   // stage bg samples only the top of the image via texture repeat, so it is
@@ -843,11 +845,7 @@ function resize() {
 }
 
 function layout() {
-  // background cover-fit
   const bt = TEX.bg.image;
-  const bs = Math.max(W / bt.width, H / bt.height);
-  backdropMesh.scale.set(bt.width * bs, bt.height * bs, 1);
-  backdropMesh.position.set(W / 2, H / 2, 0);
   // stage bg: cover-crop of the image, horizontally centered and top-anchored
   // (the window stays put; excess floor or side wall is cropped)
   const cs = Math.max(SW / bt.width, SH / bt.height);
@@ -857,6 +855,16 @@ function layout() {
   stageMap.offset.set((1 - fx) / 2, 0);
   bgMesh.scale.set(SW, SH, 1);
   bgMesh.position.set(CX, SY + SH / 2, 0);
+
+  // dimmed backdrop: a magnified copy of the stage's own crop, centered on
+  // the stage, so every letterbox strip (top/bottom/sides) continues the
+  // visible scene instead of exposing the art's near-black extremities
+  const bk = Math.max(W / SW, H / SH) * 1.06;
+  const bMap = backdropMesh.material.map;
+  bMap.repeat.copy(stageMap.repeat);
+  bMap.offset.copy(stageMap.offset);
+  backdropMesh.scale.set(SW * bk, SH * bk, 1);
+  backdropMesh.position.set(CX, SY + SH / 2, 0);
 
   // candle flames anchored over the painted candles in the bg art
   // flame anchors user-calibrated via #calibrate mode (plus manual nudges):
