@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
 <title>Infinite Lockpick</title>
 <style>
   html, body {
@@ -14,16 +15,36 @@
     -webkit-user-select: none;
     font-family: Georgia, "Times New Roman", serif;
   }
-  canvas { display: block; cursor: crosshair; }
+  canvas { position: fixed; inset: 0; display: block; }
+  #gl { cursor: crosshair; touch-action: none; }
+  #ui { pointer-events: none; }
 </style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.min.js",
+    "three/addons/": "./vendor/jsm/"
+  }
+}
+</script>
 </head>
 <body>
-<canvas id="game"></canvas>
-<script>
+<canvas id="gl"></canvas>
+<canvas id="ui"></canvas>
+<script type="module">
 "use strict";
 
-const canvas = document.getElementById("game");
-const ctx = canvas.getContext("2d");
+import * as THREE from "three";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+
+// Raw color pipeline: hex values pass straight through to the screen like the
+// Canvas 2D version (no sRGB/linear conversions to keep art colors identical).
+THREE.ColorManagement.enabled = false;
+
+const glCanvas = document.getElementById("gl");
+const ui = document.getElementById("ui").getContext("2d");
 
 // ---------- Tunables ----------
 // Values taken from Dota 2's scripts/events/dark_carnival/lockpicking/game.vdata
@@ -48,8 +69,8 @@ const WEDGE_SIZE      = 2 * Math.asin(40 / 180); // m_nUnlockRadius=40 is a circ
                                       // board units (m_nBoardRadius=180): ~25.7 deg of arc.
                                       // Verified by measuring wedges in a gameplay screenshot
                                       // (widest observed 23.5 deg, shrinking at 3 deg/s).
-const WEDGE_SHRINK    = 3 * DEG;      // m_flUnlockDegreeDecreaseRate (deg/s)
-const MIN_GAP         = 20 * DEG;     // m_flMinDegreesBetweenUnlocks
+const WEDGE_SHRINK    = 3 * DEG;      // m_flUnlockDegreeDecreaseRate (deg/s per side)
+const MIN_GAP         = 20 * DEG;     // m_flMinDegreesBetweenUnlocks (center-to-center)
 const SPAWN_BASE      = 1.4;          // m_flBaseUnlockAppearRate (s between spawns)
 const SPAWN_RAMP      = 0.04;         // m_flUnlockAppearIncreaseRate (interval shrink /s)
 const SPAWN_MIN       = 0.3;          // floor for the spawn interval
@@ -62,28 +83,23 @@ const TAU = Math.PI * 2;
 const FONT = 'Georgia, "Times New Roman", serif';
 
 // ---------- Assets ----------
-const IMG_NAMES = {
+const TEX_NAMES = {
   bg:    "assets/lockpicking_background_psd.png",
   lock:  "assets/lock_background_psd.png",
   dial:  "assets/lock_dial_psd.png",
   shank: "assets/lock_shank_psd.png",
-  sign:  "assets/sign_psd.png",
   slark: "assets/slark_head_psd.png",
 };
 // slark head is an 8x8 sprite sheet of 420x500 frames (blink/eye variants)
-const SLARK_FW = 420, SLARK_FH = 500, SLARK_COLS = 8;
+const SLARK_COLS = 8, SLARK_ROWS = 8;
 let slarkBlink = 0;      // time left showing the blink frame
 let slarkReact = 0;      // time left showing the reaction frame (on capture)
 let slarkNext = 2;       // countdown to the next idle blink
-const IMGS = {};
-let imgsLoaded = 0;
-const imgsTotal = Object.keys(IMG_NAMES).length;
-for (const [k, src] of Object.entries(IMG_NAMES)) {
-  const im = new Image();
-  im.onload = () => imgsLoaded++;
-  im.src = src;
-  IMGS[k] = im;
-}
+
+const TEX = {};
+const signImg = new Image();   // sign renders on the 2D UI layer
+signImg.src = "assets/sign_psd.png";
+let assetsReady = false;
 
 const SFX = {
   success: "assets/lockpick_success.mp3",
@@ -96,31 +112,18 @@ function playSfx(name, vol = 0.6) {
   a.play().catch(() => {}); // ignore autoplay restrictions
 }
 
-// ---------- Canvas sizing / layout ----------
+// ---------- Layout ----------
 // Lock geometry (measured from lock_background_psd.png):
 // image is 700x700, face circle center (345,346) radius 345,
 // recessed hole (where wedges live) starts at 0.82 of that radius.
 const HOLE_FRAC = 0.82;
-let W, H, CX, CY, R_LOCK, R_HOLE, R_DIAL, R_WEDGE_IN, R_WEDGE_OUT;
-function resize() {
-  const dpr = window.devicePixelRatio || 1;
-  W = window.innerWidth;
-  H = window.innerHeight;
-  canvas.width = W * dpr;
-  canvas.height = H * dpr;
-  canvas.style.width = W + "px";
-  canvas.style.height = H + "px";
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  R_LOCK = Math.min(W * 0.44, H * 0.34);  // drawn radius of the lock face
-  R_HOLE = R_LOCK * HOLE_FRAC;
-  R_WEDGE_OUT = R_HOLE * 0.99;
-  R_DIAL = R_HOLE * 0.62;
-  R_WEDGE_IN = R_DIAL * 1.01;
-  CX = W / 2;
-  CY = H * 0.60;                          // lock sits below center, sign above
-}
-window.addEventListener("resize", resize);
-resize();
+const LOCK_CX_FRAC = 345 / 700, LOCK_CY_FRAC = 346 / 700, LOCK_R_FRAC = 345 / 700;
+// letterboxed stage laid out in stage units so the composition is consistent
+// on any display. The aspect adapts to the viewport, clamped between a slim
+// phone shape and the original popup's desktop framing.
+const STAGE_ASPECT_MAX = 0.866;   // desktop: the original popup's framing
+const STAGE_ASPECT_MIN = 0.52;    // phones: tall and slim
+let W, H, SX, SY, SW, SH, CX, CY, R_LOCK, R_HOLE, R_DIAL, R_WEDGE_IN, R_WEDGE_OUT;
 
 // ---------- Game state ----------
 let phase = "menu";           // menu | playing | gameover
@@ -138,9 +141,11 @@ let floaters = [];            // {x, y, text, color, age}
 let centerFloaters = [];      // "+1.5" style popups on the dial {text, color, age}
 let flashes = [];             // rim flashes {color, age}
 let sparkles = [];            // needle trail + capture bursts
-                              // {x, y, vx, vy, age, life, size, color, drag, grav}
+                              // {x, y, vx, vy, age, life, size, color:[r,g,b], drag, grav}
 let timerPulse = 0;
 let best = 0;
+let restartLock = 0;          // seconds after losing during which clicks can't restart
+let boostLocked = false;      // on-screen toggle equivalent to holding RMB
 
 function reset() {
   timeLeft = START_TIME;
@@ -160,6 +165,7 @@ function reset() {
   flashes = [];
   sparkles = [];
   timerPulse = 0;
+  // boostLocked deliberately survives restarts
 }
 
 // ---------- Angle helpers ----------
@@ -175,14 +181,22 @@ function needleOnArc(arc) {
   return angDist(angle, arc.center) <= arc.half + NEEDLE_GRACE;
 }
 
+function hexRGB(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+}
+
 // spark burst at the needle's position on the ring when a wedge is captured
+const BURST_PALETTES = {
+  blue:   ["#6fc3ff", "#a8dcff", "#ffffff", "#3fa9ff"].map(hexRGB),
+  yellow: ["#ffdf6b", "#ffc93f", "#ffffff", "#ffb347"].map(hexRGB),
+};
+const TRAIL_COLOR = hexRGB("#b48cff");
 function spawnBurst(ang, color) {
   const r0 = (R_WEDGE_IN + R_WEDGE_OUT) / 2;
   const bx = CX + Math.cos(ang) * r0;
   const by = CY - Math.sin(ang) * r0;
-  const palette = color === "blue"
-    ? ["#6fc3ff", "#a8dcff", "#ffffff", "#3fa9ff"]
-    : ["#ffdf6b", "#ffc93f", "#ffffff", "#ffb347"];
+  const palette = BURST_PALETTES[color];
   for (let i = 0; i < 34; i++) {
     const a = Math.random() * TAU;
     const sp = 60 + Math.random() * 260;
@@ -190,9 +204,30 @@ function spawnBurst(ang, color) {
       x: bx, y: by,
       vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
       age: 0, life: 0.45 + Math.random() * 0.45,
-      size: 1.5 + Math.random() * 2.2,
+      size: 3 + Math.random() * 4.5,
       color: palette[(Math.random() * palette.length) | 0],
       drag: 2.5, grav: 140,
+    });
+  }
+}
+
+// dense red burst along the needle's length when the player misses
+const MISS_PALETTE = ["#ff4d4d", "#ff7a5c", "#ffb4a0", "#ffe0d8"].map(hexRGB);
+function spawnMissBurst(ang) {
+  const nx = Math.cos(ang), ny = -Math.sin(ang);
+  for (let i = 0; i < 52; i++) {
+    // seed on the needle line, dial edge to ring, with slight jitter
+    const rr = R_DIAL * 0.6 + Math.random() * (R_WEDGE_OUT - R_DIAL * 0.6);
+    const a = Math.random() * TAU;
+    const sp = 30 + Math.random() * 160;
+    sparkles.push({
+      x: CX + nx * rr + (Math.random() - 0.5) * 6,
+      y: CY + ny * rr + (Math.random() - 0.5) * 6,
+      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      age: 0, life: 0.35 + Math.random() * 0.4,
+      size: 2.5 + Math.random() * 3.5,
+      color: MISS_PALETTE[(Math.random() * MISS_PALETTE.length) | 0],
+      drag: 3, grav: 120,
     });
   }
 }
@@ -222,27 +257,42 @@ function trySpawnArc() {
 }
 
 // ---------- Input ----------
-canvas.addEventListener("contextmenu", e => e.preventDefault());
+glCanvas.addEventListener("contextmenu", e => e.preventDefault());
 
 function startRun() {
   reset();
   phase = "playing";
 }
 
-canvas.addEventListener("mousedown", e => {
-  if (e.button === 2) {
-    if (!fastHeld) playSfx("boost", 0.45);
-    fastHeld = true;
-    return;
-  }
-  if (e.button !== 0) return;
+// on-screen corner buttons (mobile): restart bottom-left, boost-lock bottom-right,
+// anchored inside the letterboxed stage
+const BTN_R = 34, BTN_PAD = 22;
+function buttonRects() {
+  return {
+    restart: { x: SX + BTN_PAD + BTN_R, y: SY + SH - BTN_PAD - BTN_R },
+    boost:   { x: SX + SW - BTN_PAD - BTN_R, y: SY + SH - BTN_PAD - BTN_R },
+  };
+}
+function hitButton(px, py) {
+  const b = buttonRects();
+  if (Math.hypot(px - b.restart.x, py - b.restart.y) <= BTN_R) return "restart";
+  if (Math.hypot(px - b.boost.x, py - b.boost.y) <= BTN_R) return "boost";
+  return null;
+}
+function pressButton(name) {
+  if (name === "restart") { startRun(); return; } // like R: works any time
+  boostLocked = !boostLocked;
+  if (boostLocked) playSfx("boost", 0.45);
+}
 
+function primaryAction() {
   if (phase === "menu" || phase === "gameover") {
+    if (phase === "gameover" && restartLock > 0) return; // misclick guard
     startRun();
     return;
   }
 
-  // left click during play: try to capture
+  // primary press during play: try to capture
   let hitIndex = -1;
   for (let i = 0; i < arcs.length; i++) {
     if (needleOnArc(arcs[i])) { hitIndex = i; break; }
@@ -280,9 +330,32 @@ canvas.addEventListener("mousedown", e => {
     stallTimer = MISS_STALL;
     boostMult = 1;
     playSfx("miss", 0.6);
+    spawnMissBurst(angle);
     flashes.push({ color: "#ff4d4d", age: 0 });
   }
+}
+
+glCanvas.addEventListener("mousedown", e => {
+  if (e.button === 2) {
+    if (!fastHeld && !boostLocked) playSfx("boost", 0.45); // already boosting = no sound
+    fastHeld = true;
+    return;
+  }
+  if (e.button !== 0) return;
+  const btn = hitButton(e.clientX, e.clientY);
+  if (btn) { pressButton(btn); return; }
+  primaryAction();
 });
+
+// tap = left click; buttons are hit-tested first. preventDefault stops the
+// browser from also firing a synthetic mousedown for the same tap
+glCanvas.addEventListener("touchstart", e => {
+  e.preventDefault();
+  const t = e.changedTouches[0];
+  const btn = hitButton(t.clientX, t.clientY);
+  if (btn) { pressButton(btn); return; }
+  primaryAction();
+}, { passive: false });
 
 window.addEventListener("mouseup", e => {
   if (e.button === 2) fastHeld = false;
@@ -321,6 +394,7 @@ function update(dt) {
     if (s.age > s.life) sparkles.splice(i, 1);
   }
   timerPulse = Math.max(0, timerPulse - dt * 2.5);
+  restartLock = Math.max(0, restartLock - dt);
 
   // slark idle blinking
   slarkBlink = Math.max(0, slarkBlink - dt);
@@ -339,13 +413,14 @@ function update(dt) {
     timeLeft = 0;
     phase = "gameover";
     best = Math.max(best, score);
+    restartLock = 2; // ignore stray clicks right after losing (R still works)
     return;
   }
 
   // boost multiplier compounds while RMB is held, decays when released.
   // It is pinned at 1x for the duration of the miss penalty.
   if (missState === 0) {
-    if (fastHeld) {
+    if (fastHeld || boostLocked) {
       boostMult = Math.min(MAX_SPEED_MULT, boostMult * (1 + BOOST_RAMP * dt));
     } else {
       boostMult = Math.max(1, boostMult * (1 - BOOST_DECAY * dt));
@@ -376,7 +451,7 @@ function update(dt) {
       vx: (Math.random() - 0.5) * 20,
       vy: (Math.random() - 0.5) * 20,
       age: 0, life: 0.5,
-      size: 1.6, color: "#b48cff",
+      size: 3.2, color: TRAIL_COLOR,
       drag: 0, grav: 0,
     });
   }
@@ -397,199 +472,428 @@ function update(dt) {
   }
 }
 
-// ---------- Draw helpers ----------
-function annularWedge(centerAng, halfAng, rIn, rOut) {
-  // canvas arcs are clockwise in screen coords; math angles are negated
-  const a0 = -(centerAng - halfAng);
-  const a1 = -(centerAng + halfAng);
-  ctx.beginPath();
-  ctx.arc(CX, CY, rOut, a0, a1, true);
-  ctx.arc(CX, CY, rIn, a1, a0, false);
-  ctx.closePath();
+// ---------- Three.js scene ----------
+const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true });
+renderer.toneMapping = THREE.NoToneMapping;
+renderer.outputColorSpace = THREE.LinearSRGBColorSpace; // raw pass-through, no brightening
+const scene = new THREE.Scene();
+// pixel-space orthographic camera, y pointing down like Canvas 2D
+const camera = new THREE.OrthographicCamera(0, 1, 0, 1, -1000, 1000);
+let composer, bloomPass;
+
+const unitPlane = new THREE.PlaneGeometry(1, 1);
+function spriteMesh(tex, order) {
+  const m = new THREE.Mesh(unitPlane, new THREE.MeshBasicMaterial({
+    map: tex, transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+  }));
+  m.renderOrder = order;
+  scene.add(m);
+  return m;
 }
 
+let backdropMesh, bgMesh, slarkMesh, shankMesh, lockMesh, dialMesh;
+let wedgeMeshes = [];
+let needleMesh, tipMesh, points, pointsGeom;
+const MAX_PARTICLES = 800;
+
+const WEDGE_COLORS = {
+  yellow: { c0: hexRGB("#97731c"), c1: hexRGB("#f0bc2e"), c2: hexRGB("#ffe98a"), rim: hexRGB("#fff5c8") },
+  blue:   { c0: hexRGB("#28568e"), c1: hexRGB("#4296ec"), c2: hexRGB("#8ed3ff"), rim: hexRGB("#cdeaff") },
+};
+
+const wedgeShader = {
+  vertexShader: /* glsl */`
+    varying vec2 vLocal;
+    void main() {
+      vLocal = position.xy; // [-1,1] quad, y up in local space
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`,
+  fragmentShader: /* glsl */`
+    uniform float uCenter, uHalf, uRIn, uROut, uLockSize;
+    uniform vec2 uLockC;
+    uniform vec3 uC0, uC1, uC2, uRim;
+    uniform sampler2D uLockTex;
+    varying vec2 vLocal;
+    const float PI = 3.14159265359;
+    void main() {
+      float r = length(vLocal);
+      if (r > 1.0 || r < uRIn) discard;
+      // math-convention angle: local +y renders DOWN on screen (y-down
+      // camera), so negate y to match the game's y-up angle convention
+      float ang = atan(-vLocal.y, vLocal.x);
+      float d = abs(mod(ang - uCenter + PI, 2.0 * PI) - PI);
+      if (d > uHalf) discard;
+      // three-stop radial gradient (matches the canvas version's stops)
+      float t = clamp((r - uRIn) / (1.0 - uRIn), 0.0, 1.0);
+      vec3 col = t < 0.55 ? mix(uC0, uC1, t / 0.55)
+                          : mix(uC1, uC2, (t - 0.55) / 0.45);
+      // lock face scratches composited in (grayscale, brightness 4, contrast 1.8,
+      // overlay blend) so the wedge reads as a tinted overlay on the metal
+      vec2 world = vLocal * uROut; // local +y is already screen/image down
+      vec2 uv = (world + uLockC * uLockSize) / uLockSize;
+      vec3 tex = texture2D(uLockTex, uv).rgb; // flipY=false: uv.y from image top
+      float lum = dot(tex, vec3(0.299, 0.587, 0.114));
+      lum = clamp((lum * 4.0 - 0.5) * 1.8 + 0.5, 0.0, 1.0);
+      vec3 ov = mix(2.0 * col * lum,
+                    1.0 - 2.0 * (1.0 - col) * (1.0 - lum),
+                    step(0.5, lum));
+      col = mix(col, ov, 0.75);
+      // beveled light edge, ~2px
+      float edgeA = (uHalf - d) * max(r, 0.05) * uROut;
+      float edgeR = min(r - uRIn, 1.0 - r) * uROut;
+      float rimK = 1.0 - smoothstep(0.0, 2.0, min(edgeA, edgeR));
+      col = mix(col, uRim, rimK * 0.55);
+      gl_FragColor = vec4(col, 1.0);
+    }`,
+};
+
+const needleShader = {
+  vertexShader: /* glsl */`
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`,
+  fragmentShader: /* glsl */`
+    uniform vec3 uA, uB;
+    varying vec2 vUv;
+    void main() {
+      float t = vUv.x;
+      vec3 col = mix(uA, uB, smoothstep(0.35, 1.0, t));
+      float alpha = clamp(t / 0.35, 0.0, 1.0);
+      // soften the long edges
+      alpha *= smoothstep(1.0, 0.45, abs(vUv.y * 2.0 - 1.0));
+      gl_FragColor = vec4(col, alpha);
+    }`,
+};
+
+const NEEDLE_COLORS = {
+  normal:    { a: hexRGB("#8a5cff"), b: hexRGB("#e6d8ff"), tip: hexRGB("#f0e8ff") },
+  penalized: { a: hexRGB("#ff8d6b"), b: hexRGB("#ffd0b8"), tip: hexRGB("#ffd0b8") },
+};
+
+const pointShader = {
+  vertexShader: /* glsl */`
+    attribute float aSize;
+    attribute float aAlpha;
+    attribute vec3 aColor;
+    varying vec3 vColor;
+    varying float vAlpha;
+    uniform float uDpr;
+    void main() {
+      vColor = aColor;
+      vAlpha = aAlpha;
+      gl_PointSize = aSize * uDpr;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`,
+  fragmentShader: /* glsl */`
+    varying vec3 vColor;
+    varying float vAlpha;
+    void main() {
+      float d = length(gl_PointCoord - 0.5);
+      float a = vAlpha * smoothstep(0.5, 0.12, d);
+      gl_FragColor = vec4(vColor * a, a);
+    }`,
+};
+
+function buildScene() {
+  // dimmed copy of the art cover-filling the whole viewport behind the stage
+  backdropMesh = spriteMesh(TEX.bg, -1);
+  backdropMesh.material.transparent = false;
+  backdropMesh.material.color.setScalar(0.22);
+  // stage bg samples only the top of the image via texture repeat, so it is
+  // exactly stage-sized with no overflow (no bars needed to mask it)
+  const stageTex = TEX.bg.clone();
+  stageTex.needsUpdate = true;
+  bgMesh = spriteMesh(stageTex, 0);
+  bgMesh.material.transparent = false;
+  slarkMesh = spriteMesh(TEX.slark, 10);
+  TEX.slark.repeat.set(1 / SLARK_COLS, 1 / SLARK_ROWS);
+  shankMesh = spriteMesh(TEX.shank, 20);
+  lockMesh = spriteMesh(TEX.lock, 30);
+
+  for (let i = 0; i < MAX_ARCS; i++) {
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uCenter: { value: 0 }, uHalf: { value: 0 },
+        uRIn: { value: 0.6 }, uROut: { value: 100 },
+        uLockSize: { value: 100 }, uLockC: { value: new THREE.Vector2(LOCK_CX_FRAC, LOCK_CY_FRAC) },
+        uC0: { value: new THREE.Vector3() }, uC1: { value: new THREE.Vector3() },
+        uC2: { value: new THREE.Vector3() }, uRim: { value: new THREE.Vector3() },
+        uLockTex: { value: TEX.lock },
+      },
+      vertexShader: wedgeShader.vertexShader,
+      fragmentShader: wedgeShader.fragmentShader,
+      transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+    });
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+    m.renderOrder = 40;
+    m.visible = false;
+    scene.add(m);
+    wedgeMeshes.push(m);
+  }
+
+  // particles between wedges and needle
+  pointsGeom = new THREE.BufferGeometry();
+  pointsGeom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(MAX_PARTICLES * 3), 3));
+  pointsGeom.setAttribute("aColor", new THREE.BufferAttribute(new Float32Array(MAX_PARTICLES * 3), 3));
+  pointsGeom.setAttribute("aSize", new THREE.BufferAttribute(new Float32Array(MAX_PARTICLES), 1));
+  pointsGeom.setAttribute("aAlpha", new THREE.BufferAttribute(new Float32Array(MAX_PARTICLES), 1));
+  points = new THREE.Points(pointsGeom, new THREE.ShaderMaterial({
+    uniforms: { uDpr: { value: 1 } },
+    vertexShader: pointShader.vertexShader,
+    fragmentShader: pointShader.fragmentShader,
+    transparent: true, depthTest: false, depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  }));
+  points.renderOrder = 45;
+  points.frustumCulled = false;
+  scene.add(points);
+
+  // needle: unit quad anchored at its inner end
+  const ng = new THREE.PlaneGeometry(1, 1);
+  ng.translate(0.5, 0, 0);
+  needleMesh = new THREE.Mesh(ng, new THREE.ShaderMaterial({
+    uniforms: {
+      uA: { value: new THREE.Vector3(...NEEDLE_COLORS.normal.a) },
+      uB: { value: new THREE.Vector3(...NEEDLE_COLORS.normal.b) },
+    },
+    vertexShader: needleShader.vertexShader,
+    fragmentShader: needleShader.fragmentShader,
+    transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+  }));
+  needleMesh.renderOrder = 50;
+  scene.add(needleMesh);
+
+  tipMesh = new THREE.Mesh(new THREE.CircleGeometry(1, 24), new THREE.MeshBasicMaterial({
+    color: new THREE.Color(...NEEDLE_COLORS.normal.tip),
+    transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+  }));
+  tipMesh.renderOrder = 51;
+  scene.add(tipMesh);
+
+  dialMesh = spriteMesh(TEX.dial, 60);
+}
+
+// ---------- Sizing ----------
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth;
+  H = window.innerHeight;
+
+  renderer.setPixelRatio(dpr);
+  renderer.setSize(W, H); // also sets canvas CSS size — critical on high-DPR screens
+  camera.left = 0; camera.right = W;
+  camera.top = 0; camera.bottom = H;
+  camera.updateProjectionMatrix();
+  if (composer) {
+    composer.setPixelRatio(dpr);
+    composer.setSize(W, H);
+  }
+
+  const uiCanvas = ui.canvas;
+  uiCanvas.width = W * dpr;
+  uiCanvas.height = H * dpr;
+  uiCanvas.style.width = W + "px";
+  uiCanvas.style.height = H + "px";
+  ui.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const aspect = Math.min(STAGE_ASPECT_MAX, Math.max(STAGE_ASPECT_MIN, W / H));
+  SH = Math.min(H, W / aspect);
+  SW = SH * aspect;
+  SX = (W - SW) / 2;
+  SY = (H - SH) / 2;
+  R_LOCK = SW * 0.33;                     // drawn radius of the lock face
+  R_HOLE = R_LOCK * HOLE_FRAC;
+  R_WEDGE_OUT = R_HOLE * 0.99;
+  R_DIAL = R_HOLE * 0.62;
+  R_WEDGE_IN = R_DIAL * 1.01;
+  CX = SX + SW / 2;
+  CY = SY + SH * 0.66;                    // lock low in the stage; sign and slark above
+
+  if (assetsReady) layout();
+}
+
+function layout() {
+  // background cover-fit
+  const bt = TEX.bg.image;
+  const bs = Math.max(W / bt.width, H / bt.height);
+  backdropMesh.scale.set(bt.width * bs, bt.height * bs, 1);
+  backdropMesh.position.set(W / 2, H / 2, 0);
+  // stage bg: cover-crop of the image, horizontally centered and top-anchored
+  // (the window stays put; excess floor or side wall is cropped)
+  const cs = Math.max(SW / bt.width, SH / bt.height);
+  const fx = SW / (bt.width * cs), fy = SH / (bt.height * cs);
+  const stageMap = bgMesh.material.map;
+  stageMap.repeat.set(fx, fy);
+  stageMap.offset.set((1 - fx) / 2, 0);
+  bgMesh.scale.set(SW, SH, 1);
+  bgMesh.position.set(CX, SY + SH / 2, 0);
+
+  // slark is anchored in background-image coordinates so he stays in the
+  // prison window whatever the stage aspect (head 515px wide, chin at
+  // y=716 in the 1200x1600 art — identical to the old lock-relative
+  // placement at the desktop aspect)
+  const headW = 515 * cs;
+  const headH = headW * (500 / 420);
+  slarkMesh.scale.set(headW, headH, 1);
+  slarkMesh.position.set(CX, SY + 716 * cs - headH / 2, 0);
+
+  const shW = R_LOCK * 1.5;
+  const shH = shW * (TEX.shank.image.height / TEX.shank.image.width);
+  shankMesh.scale.set(shW, shH, 1);
+  shankMesh.position.set(CX, CY - R_LOCK * 0.55 - shH / 2, 0);
+
+  const lockDrawW = R_LOCK / LOCK_R_FRAC;
+  lockMesh.scale.set(lockDrawW, lockDrawW, 1);
+  // lock face circle center sits at (CX, CY) -> offset the image accordingly
+  lockMesh.position.set(
+    CX + lockDrawW * (0.5 - LOCK_CX_FRAC),
+    CY + lockDrawW * (0.5 - LOCK_CY_FRAC), 0);
+
+  for (const m of wedgeMeshes) {
+    m.scale.set(R_WEDGE_OUT, R_WEDGE_OUT, 1);
+    m.position.set(CX, CY, 0);
+    m.material.uniforms.uRIn.value = R_WEDGE_IN / R_WEDGE_OUT;
+    m.material.uniforms.uROut.value = R_WEDGE_OUT;
+    m.material.uniforms.uLockSize.value = lockDrawW;
+  }
+
+  needleMesh.scale.set(R_WEDGE_OUT, 3.2, 1);
+  needleMesh.position.set(CX, CY, 0);
+  tipMesh.scale.set(3, 3, 1);
+
+  dialMesh.scale.set(R_DIAL * 2, R_DIAL * 2, 1);
+  dialMesh.position.set(CX, CY, 0);
+}
+
+// ---------- Per-frame visual sync ----------
+function syncScene() {
+  // slark sprite frame: reaction wins over blink, else idle
+  const frame = slarkReact > 0 ? 8 : (slarkBlink > 0 ? 1 : 0);
+  const col = frame % SLARK_COLS, row = Math.floor(frame / SLARK_COLS);
+  TEX.slark.offset.set(col / SLARK_COLS, row / SLARK_ROWS); // flipY=false: v=0 is sheet top
+
+  // wedges
+  for (let i = 0; i < wedgeMeshes.length; i++) {
+    const m = wedgeMeshes[i];
+    if (i < arcs.length) {
+      const a = arcs[i];
+      const cset = WEDGE_COLORS[a.color];
+      m.visible = true;
+      m.material.uniforms.uCenter.value = a.center;
+      m.material.uniforms.uHalf.value = a.half;
+      m.material.uniforms.uC0.value.set(...cset.c0);
+      m.material.uniforms.uC1.value.set(...cset.c1);
+      m.material.uniforms.uC2.value.set(...cset.c2);
+      m.material.uniforms.uRim.value.set(...cset.rim);
+    } else {
+      m.visible = false;
+    }
+  }
+
+  // needle (world y is down; rotation.z is negated to keep math convention)
+  needleMesh.rotation.z = -angle;
+  const nc = missState !== 0 ? NEEDLE_COLORS.penalized : NEEDLE_COLORS.normal;
+  needleMesh.material.uniforms.uA.value.set(...nc.a);
+  needleMesh.material.uniforms.uB.value.set(...nc.b);
+  tipMesh.position.set(CX + Math.cos(angle) * R_WEDGE_OUT,
+                       CY - Math.sin(angle) * R_WEDGE_OUT, 0);
+  tipMesh.material.color.setRGB(...nc.tip);
+
+  // particles
+  const pos = pointsGeom.attributes.position.array;
+  const colA = pointsGeom.attributes.aColor.array;
+  const sizeA = pointsGeom.attributes.aSize.array;
+  const alphaA = pointsGeom.attributes.aAlpha.array;
+  const n = Math.min(sparkles.length, MAX_PARTICLES);
+  for (let i = 0; i < n; i++) {
+    const s = sparkles[i];
+    const k = 1 - s.age / s.life;
+    pos[i * 3] = s.x; pos[i * 3 + 1] = s.y; pos[i * 3 + 2] = 0;
+    colA[i * 3] = s.color[0]; colA[i * 3 + 1] = s.color[1]; colA[i * 3 + 2] = s.color[2];
+    sizeA[i] = s.size * k + 1;
+    alphaA[i] = 0.8 * k;
+  }
+  pointsGeom.setDrawRange(0, n);
+  pointsGeom.attributes.position.needsUpdate = true;
+  pointsGeom.attributes.aColor.needsUpdate = true;
+  pointsGeom.attributes.aSize.needsUpdate = true;
+  pointsGeom.attributes.aAlpha.needsUpdate = true;
+  points.material.uniforms.uDpr.value = window.devicePixelRatio || 1;
+}
+
+// ---------- 2D UI layer ----------
 function smallCaps(text, x, y, sizePx, color, spacing) {
-  ctx.font = `600 ${sizePx}px ${FONT}`;
-  ctx.fillStyle = color;
+  ui.font = `600 ${sizePx}px ${FONT}`;
+  ui.fillStyle = color;
   const chars = text.split("");
   let total = 0;
-  for (const c of chars) total += ctx.measureText(c).width + spacing;
+  for (const c of chars) total += ui.measureText(c).width + spacing;
   total -= spacing;
   let cx = x - total / 2;
-  ctx.textAlign = "left";
+  ui.textAlign = "left";
   for (const c of chars) {
-    ctx.fillText(c, cx, y);
-    cx += ctx.measureText(c).width + spacing;
+    ui.fillText(c, cx, y);
+    cx += ui.measureText(c).width + spacing;
   }
-  ctx.textAlign = "center";
+  ui.textAlign = "center";
 }
 
-// ---------- Draw ----------
-function draw() {
-  if (imgsLoaded < imgsTotal) {
-    ctx.fillStyle = "#0b0e14";
-    ctx.fillRect(0, 0, W, H);
-    ctx.fillStyle = "#8d8578";
-    ctx.font = `500 16px ${FONT}`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("Loading…", CX, CY);
+function drawSign() {
+  const signW = SW * 0.6;
+  const signH = signW * (signImg.height / signImg.width);
+  const signX = CX - signW / 2;
+  const signY = SY - signH * 0.06; // chains run off the top of the stage
+  ui.drawImage(signImg, signX, signY, signW, signH);
+  ui.textAlign = "center";
+  ui.textBaseline = "middle";
+  ui.font = `700 ${Math.round(signW * 0.085)}px ${FONT}`;
+  ui.fillStyle = "#d9c18a";
+  ui.shadowColor = "#000";
+  ui.shadowBlur = 6;
+  ui.fillText("PICK THE LOCK", CX, signY + signH * 0.70);
+  ui.shadowBlur = 0;
+}
+
+function drawUI() {
+  ui.clearRect(0, 0, W, H);
+
+  if (!assetsReady) {
+    ui.fillStyle = "#8d8578";
+    ui.font = `500 16px ${FONT}`;
+    ui.textAlign = "center";
+    ui.textBaseline = "middle";
+    ui.fillText("Loading…", W / 2, H / 2);
     return;
   }
 
-  // ---- dungeon background, cover-fit ----
-  const bg = IMGS.bg;
-  const scale = Math.max(W / bg.width, H / bg.height);
-  const bw = bg.width * scale, bh = bg.height * scale;
-  ctx.drawImage(bg, (W - bw) / 2, (H - bh) / 2, bw, bh);
-
-  // ---- slark peeking over the lock (behind sign, shackle and lock body) ----
-  {
-    // reaction frame wins over blink, else idle
-    const frame = slarkReact > 0 ? 8 : (slarkBlink > 0 ? 1 : 0);
-    const col = frame % SLARK_COLS, row = Math.floor(frame / SLARK_COLS);
-    const headW = R_LOCK * 1.05;
-    const headH = headW * (SLARK_FH / SLARK_FW);
-    const hx = CX - headW / 2;
-    const hy = CY - R_LOCK * 0.55 - headH;
-    ctx.drawImage(IMGS.slark, col * SLARK_FW, row * SLARK_FH, SLARK_FW, SLARK_FH,
-                  hx, hy, headW, headH);
-  }
-
-  // ---- hanging sign with title ----
-  const signW = Math.min(W * 0.42, R_LOCK * 1.35);
-  const signH = signW * (IMGS.sign.height / IMGS.sign.width);
-  const signX = CX - signW / 2;
-  const signY = -signH * 0.06; // chains run off the top of the screen
-  ctx.drawImage(IMGS.sign, signX, signY, signW, signH);
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.font = `700 ${Math.round(signW * 0.085)}px ${FONT}`;
-  ctx.fillStyle = "#d9c18a";
-  ctx.shadowColor = "#000";
-  ctx.shadowBlur = 6;
-  ctx.fillText("PICK THE LOCK", CX, signY + signH * 0.70);
-  ctx.shadowBlur = 0;
-
-  // ---- rim flashes (hit/miss feedback), behind the lock ----
+  // rim flashes (hit/miss feedback) around the lock
   for (const f of flashes) {
     const k = 1 - f.age / 0.35;
-    ctx.beginPath();
-    ctx.arc(CX, CY, R_LOCK + 4 + 10 * k, 0, TAU);
-    ctx.strokeStyle = f.color;
-    ctx.globalAlpha = 0.45 * k;
-    ctx.lineWidth = 8 + 10 * k;
-    ctx.stroke();
-    ctx.globalAlpha = 1;
+    ui.beginPath();
+    ui.arc(CX, CY, R_LOCK + 4 + 10 * k, 0, TAU);
+    ui.strokeStyle = f.color;
+    ui.globalAlpha = 0.45 * k;
+    ui.lineWidth = 8 + 10 * k;
+    ui.stroke();
+    ui.globalAlpha = 1;
   }
 
-  // ---- shackle behind the lock body ----
-  const shW = R_LOCK * 1.5;
-  const shH = shW * (IMGS.shank.height / IMGS.shank.width);
-  ctx.drawImage(IMGS.shank, CX - shW / 2, CY - R_LOCK * 0.55 - shH, shW, shH);
+  drawSign();
 
-  // ---- lock body (face circle center matches image center 345,346 of 700px) ----
-  const lockDraw = R_LOCK / (345 / 700); // full image width when face radius = R_LOCK
-  ctx.drawImage(IMGS.lock, CX - lockDraw * (345 / 700), CY - lockDraw * (346 / 700), lockDraw, lockDraw);
-
-  // ---- wedges: filled pie segments in the recessed ring ----
-  for (const a of arcs) {
-    const half = a.half;
-    const grad = ctx.createRadialGradient(CX, CY, R_WEDGE_IN, CX, CY, R_WEDGE_OUT);
-    if (a.color === "blue") {
-      grad.addColorStop(0, "#1d3f6e");
-      grad.addColorStop(0.6, "#2f7fd6");
-      grad.addColorStop(1, "#6fc3ff");
-    } else {
-      grad.addColorStop(0, "#7a5c14");
-      grad.addColorStop(0.55, "#d9a721");
-      grad.addColorStop(1, "#ffdf6b");
-    }
-    annularWedge(a.center, half, R_WEDGE_IN, R_WEDGE_OUT);
-    ctx.fillStyle = grad;
-    ctx.shadowColor = a.color === "blue" ? "#4db8ff" : "#ffc93f";
-    ctx.shadowBlur = 14;
-    ctx.fill();
-    ctx.shadowBlur = 0;
-    // composite the lock face's scratch/crack texture into the wedge so the
-    // color reads as a tinted overlay on the metal (the raw texture is nearly
-    // black, so it needs a big brightness boost to modulate visibly)
-    ctx.save();
-    annularWedge(a.center, half, R_WEDGE_IN, R_WEDGE_OUT);
-    ctx.clip();
-    ctx.globalCompositeOperation = "overlay";
-    ctx.filter = "grayscale(1) brightness(4) contrast(1.8)";
-    const lockDrawW = R_LOCK / (345 / 700);
-    ctx.drawImage(IMGS.lock, CX - lockDrawW * (345 / 700), CY - lockDrawW * (346 / 700),
-                  lockDrawW, lockDrawW);
-    ctx.filter = "none";
-    ctx.restore();
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = a.color === "blue" ? "rgba(180,225,255,0.55)" : "rgba(255,240,180,0.55)";
-    ctx.stroke();
-  }
-
-  // ---- needle trail + capture spark bursts (additive for glow) ----
-  ctx.save();
-  ctx.globalCompositeOperation = "lighter";
-  for (const s of sparkles) {
-    const k = 1 - s.age / s.life;
-    ctx.globalAlpha = 0.8 * k;
-    ctx.fillStyle = s.color;
-    ctx.beginPath();
-    ctx.arc(s.x, s.y, s.size * k + 0.3, 0, TAU);
-    ctx.fill();
-  }
-  ctx.restore();
-  ctx.globalAlpha = 1;
-
-  // ---- needle: thin glowing purple line from center to hole edge ----
-  const nx = Math.cos(angle), ny = -Math.sin(angle);
-  const penalized = missState !== 0;
-  const needleGrad = ctx.createLinearGradient(CX, CY, CX + nx * R_WEDGE_OUT, CY + ny * R_WEDGE_OUT);
-  if (penalized) {
-    needleGrad.addColorStop(0, "rgba(255,110,80,0)");
-    needleGrad.addColorStop(0.35, "#ff8d6b");
-    needleGrad.addColorStop(1, "#ffd0b8");
-  } else {
-    needleGrad.addColorStop(0, "rgba(120,80,220,0)");
-    needleGrad.addColorStop(0.35, "#8a5cff");
-    needleGrad.addColorStop(1, "#e6d8ff");
-  }
-  ctx.beginPath();
-  ctx.moveTo(CX, CY);
-  ctx.lineTo(CX + nx * R_WEDGE_OUT, CY + ny * R_WEDGE_OUT);
-  ctx.strokeStyle = needleGrad;
-  ctx.lineWidth = 3;
-  ctx.lineCap = "round";
-  ctx.shadowColor = penalized ? "#ff6b4d" : "#9a6cff";
-  ctx.shadowBlur = 12;
-  ctx.stroke();
-  ctx.shadowBlur = 0;
-  // bright tip
-  ctx.beginPath();
-  ctx.arc(CX + nx * R_WEDGE_OUT, CY + ny * R_WEDGE_OUT, 3, 0, TAU);
-  ctx.fillStyle = penalized ? "#ffd0b8" : "#f0e8ff";
-  ctx.shadowColor = penalized ? "#ff6b4d" : "#b48cff";
-  ctx.shadowBlur = 10;
-  ctx.fill();
-  ctx.shadowBlur = 0;
-
-  // ---- dial disc drawn over the needle so it hides its center portion ----
-  ctx.drawImage(IMGS.dial, CX - R_DIAL, CY - R_DIAL, R_DIAL * 2, R_DIAL * 2);
-
-  // ---- center text: +bonus / TIME REMAINING / time / SCORE / score ----
+  // center text: +bonus / TIME REMAINING / time / SCORE / score
   if (phase !== "menu") {
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
+    ui.textAlign = "center";
+    ui.textBaseline = "middle";
 
     for (const f of centerFloaters) {
       const k = f.age / 1.0;
-      ctx.globalAlpha = 1 - k;
-      ctx.font = `700 ${Math.round(R_DIAL * 0.2)}px ${FONT}`;
-      ctx.fillStyle = f.color;
-      ctx.fillText(f.text, CX, CY - R_DIAL * 0.52 - k * 14);
-      ctx.globalAlpha = 1;
+      ui.globalAlpha = 1 - k;
+      ui.font = `700 ${Math.round(R_DIAL * 0.2)}px ${FONT}`;
+      ui.fillStyle = f.color;
+      ui.fillText(f.text, CX, CY - R_DIAL * 0.52 - k * 14);
+      ui.globalAlpha = 1;
     }
 
     smallCaps("TIME REMAINING", CX, CY - R_DIAL * 0.26, Math.round(R_DIAL * 0.11), "#8d8578", 2);
@@ -598,28 +902,28 @@ function draw() {
     let timerColor = "#efe9dc";
     if (pulse > 0) timerColor = "#6effa1";
     else if (phase === "playing" && timeLeft < 5) timerColor = "#ff6b6b";
-    ctx.font = `700 ${Math.round(R_DIAL * 0.5)}px ${FONT}`;
-    ctx.fillStyle = timerColor;
-    ctx.shadowColor = timerColor;
-    ctx.shadowBlur = pulse > 0 ? 22 * pulse : 6;
-    ctx.fillText(timeLeft.toFixed(1), CX, CY + R_DIAL * 0.06);
-    ctx.shadowBlur = 0;
+    ui.font = `700 ${Math.round(R_DIAL * 0.5)}px ${FONT}`;
+    ui.fillStyle = timerColor;
+    ui.shadowColor = timerColor;
+    ui.shadowBlur = pulse > 0 ? 22 * pulse : 6;
+    ui.fillText(timeLeft.toFixed(1), CX, CY + R_DIAL * 0.06);
+    ui.shadowBlur = 0;
 
     smallCaps("SCORE", CX, CY + R_DIAL * 0.42, Math.round(R_DIAL * 0.11), "#8d8578", 2);
-    ctx.font = `700 ${Math.round(R_DIAL * 0.22)}px ${FONT}`;
-    ctx.fillStyle = "#ffe98a";
-    ctx.fillText(score.toLocaleString(), CX, CY + R_DIAL * 0.66);
+    ui.font = `700 ${Math.round(R_DIAL * 0.22)}px ${FONT}`;
+    ui.fillStyle = "#ffe98a";
+    ui.fillText(score.toLocaleString(), CX, CY + R_DIAL * 0.66);
   }
 
   // floating score texts over the ring
   for (const f of floaters) {
     const k = f.age / 1.1;
-    ctx.globalAlpha = 1 - k;
-    ctx.font = `700 ${Math.round(R_LOCK * 0.09)}px ${FONT}`;
-    ctx.fillStyle = f.color;
-    ctx.textAlign = "center";
-    ctx.fillText(f.text, f.x, f.y - k * 40);
-    ctx.globalAlpha = 1;
+    ui.globalAlpha = 1 - k;
+    ui.font = `700 ${Math.round(R_LOCK * 0.09)}px ${FONT}`;
+    ui.fillStyle = f.color;
+    ui.textAlign = "center";
+    ui.fillText(f.text, f.x, f.y - k * 40);
+    ui.globalAlpha = 1;
   }
 
   // overlays
@@ -632,58 +936,101 @@ function draw() {
     drawOverlayText(
       "Final score: " + score.toLocaleString(),
       best > 0 ? "Best: " + best.toLocaleString() : "",
-      "Click or press R to play again");
+      restartLock > 0 ? "" : "Click or press R to play again");
   } else {
-    ctx.textAlign = "center";
-    ctx.font = `500 13px ${FONT}`;
-    ctx.fillStyle = "rgba(200,190,170,0.55)";
-    ctx.fillText("LMB capture • hold RMB to speed up • R to restart", CX, H - 14);
+    ui.textAlign = "center";
+    ui.font = `500 13px ${FONT}`;
+    ui.fillStyle = "rgba(200,190,170,0.55)";
+    ui.fillText("LMB capture • hold RMB to speed up • R to restart", CX, SY + SH - 14);
   }
+
+  drawButtons();
+}
+
+function drawRoundBtn(pos, glyph, active) {
+  ui.beginPath();
+  ui.arc(pos.x, pos.y, BTN_R, 0, TAU);
+  ui.fillStyle = active ? "rgba(201,169,79,0.92)" : "rgba(18,15,13,0.8)";
+  ui.fill();
+  ui.lineWidth = 2;
+  ui.strokeStyle = active ? "#ffe98a" : "#c9a94f";
+  ui.stroke();
+  ui.fillStyle = active ? "#1a1410" : "#d9c18a";
+  ui.font = "700 " + Math.round(BTN_R * 1.05) + "px " + FONT;
+  ui.textAlign = "center";
+  ui.textBaseline = "middle";
+  ui.fillText(glyph, pos.x, pos.y + 1);
+}
+function drawButtons() {
+  const b = buttonRects();
+  drawRoundBtn(b.restart, "\u21bb", false);      // restart
+  drawRoundBtn(b.boost, "\u00bb", boostLocked);  // boost lock
 }
 
 function drawOverlayText(line1, line2, cta) {
-  // dim everything below the sign
-  ctx.fillStyle = "rgba(8,7,9,0.55)";
-  ctx.fillRect(0, 0, W, H);
-  // redraw the sign over the dim layer so the title stays bright
-  const signW = Math.min(W * 0.42, R_LOCK * 1.35);
-  const signH = signW * (IMGS.sign.height / IMGS.sign.width);
-  const signX = CX - signW / 2;
-  const signY = -signH * 0.06;
-  ctx.drawImage(IMGS.sign, signX, signY, signW, signH);
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.font = `700 ${Math.round(signW * 0.085)}px ${FONT}`;
-  ctx.fillStyle = "#d9c18a";
-  ctx.shadowColor = "#000";
-  ctx.shadowBlur = 6;
-  ctx.fillText("PICK THE LOCK", CX, signY + signH * 0.70);
-  ctx.shadowBlur = 0;
+  ui.fillStyle = "rgba(8,7,9,0.55)";
+  ui.fillRect(0, 0, W, H);
+  drawSign(); // keep the title bright above the dim layer
 
-  ctx.font = `500 ${Math.round(R_LOCK * 0.07)}px ${FONT}`;
-  ctx.fillStyle = "#cfc4a6";
-  if (line1) ctx.fillText(line1, CX, CY - R_LOCK * 0.15);
-  if (line2) ctx.fillText(line2, CX, CY);
-  const blink = 0.6 + 0.4 * Math.sin(performance.now() / 300);
-  ctx.globalAlpha = blink;
-  ctx.font = `700 ${Math.round(R_LOCK * 0.09)}px ${FONT}`;
-  ctx.fillStyle = "#ffe98a";
-  ctx.fillText(cta, CX, CY + R_LOCK * 0.3);
-  ctx.globalAlpha = 1;
+  ui.textAlign = "center";
+  ui.textBaseline = "middle";
+  ui.font = `500 ${Math.round(R_LOCK * 0.07)}px ${FONT}`;
+  ui.fillStyle = "#cfc4a6";
+  if (line1) ui.fillText(line1, CX, CY - R_LOCK * 0.15);
+  if (line2) ui.fillText(line2, CX, CY);
+  if (cta) {
+    const blink = 0.6 + 0.4 * Math.sin(performance.now() / 300);
+    ui.globalAlpha = blink;
+    ui.font = `700 ${Math.round(R_LOCK * 0.09)}px ${FONT}`;
+    ui.fillStyle = "#ffe98a";
+    ui.fillText(cta, CX, CY + R_LOCK * 0.3);
+    ui.globalAlpha = 1;
+  }
 }
 
-// ---------- Main loop ----------
-reset(); // initialize state so the menu frame has a valid needle angle
+// ---------- Boot ----------
+const loader = new THREE.TextureLoader();
+async function loadAssets() {
+  const entries = Object.entries(TEX_NAMES);
+  const texes = await Promise.all(entries.map(([k, src]) => loader.loadAsync(src)));
+  entries.forEach(([k], i) => {
+    const t = texes[i];
+    t.colorSpace = THREE.NoColorSpace;
+    t.flipY = false; // y-down camera flips plane UVs; unflipped data renders upright
+    t.minFilter = THREE.LinearFilter;
+    t.generateMipmaps = false;
+    TEX[k] = t;
+  });
+  if (!signImg.complete) await new Promise(res => { signImg.onload = res; signImg.onerror = res; });
+
+  buildScene();
+  composer = new EffectComposer(renderer);
+  composer.addPass(new RenderPass(scene, camera));
+  bloomPass = new UnrealBloomPass(new THREE.Vector2(W, H), 0.45, 0.4, 0.62);
+  composer.addPass(bloomPass);
+  assetsReady = true;
+  resize(); // now that meshes exist, lay them out
+}
+
+reset(); // initialize state so the first frame has a valid needle angle
 if (location.hash === "#autostart") startRun(); // for automated screenshots/testing
+resize();
+loadAssets();
+
 let lastT = performance.now();
 function frame(now) {
-  const dt = Math.min((now - lastT) / 1000, 0.05); // clamp to avoid tab-switch jumps
+  const dt = Math.max(0, Math.min((now - lastT) / 1000, 0.05)); // clamp tab-switch jumps / non-monotonic timestamps
   lastT = now;
   update(dt);
-  draw();
+  if (assetsReady) {
+    syncScene();
+    composer.render();
+  }
+  drawUI();
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
+window.addEventListener("resize", resize);
 </script>
 </body>
 </html>
