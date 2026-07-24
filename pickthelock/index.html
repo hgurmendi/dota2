@@ -178,6 +178,7 @@ let missState;                // 0 = normal, 2 = stalled, 3 = recovering
 let stallTimer;               // countdown for the full-stop dwell
 let blueChance;               // escalating pity chance for blue wedges
 let fastHeld = false;
+let keyBoostHeld = false;     // S held: keyboard equivalent of RMB boost
 let spawnTimer;
 let arcs = [];                // {center, half, color}
 let centerFloaters = [];      // "+1.5" style popups on the dial {text, color, age}
@@ -187,6 +188,7 @@ let displayScore = 0;         // rolls up continuously toward the real score
 let best = 0;
 let restartLock = 0;          // seconds after losing during which clicks can't restart
 let boostLocked = false;      // on-screen toggle equivalent to holding RMB
+let paused = false;           // P toggles during play
 let won = false;              // score >= WIN_SCORE when time ran out
 let shankPop = 0;             // 0 closed .. 1 pried open (win animation)
 let shankBaseY = 0;           // shackle rest position, set in layout()
@@ -212,6 +214,7 @@ function reset() {
   sparkles = [];
   displayScore = 0;
   won = false;
+  paused = false;
   shankPop = 0;
   sparkT = 1e9;
   shockT = 1e9;
@@ -322,6 +325,8 @@ function startRun() {
 // on-screen corner buttons (mobile): restart bottom-left, boost-lock bottom-right,
 // anchored inside the letterboxed stage
 let BTN_R = 34, BTN_PAD = 22; // scaled with the stage in resize()
+const IS_TOUCH = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+let hoverBtn = null;          // desktop: button under the mouse (for tooltips)
 function buttonRects() {
   return {
     restart: { x: SX + BTN_PAD + BTN_R, y: SY + SH - BTN_PAD - BTN_R },
@@ -343,10 +348,11 @@ function pressButton(name) {
   if (name === "music") { setMusic(!musicOn); return; }
   if (name === "sfx") { setSfx(!sfxOn); return; }
   boostLocked = !boostLocked;
-  if (boostLocked) playSfx("boost", 0.45);
+  if (boostLocked && !paused && !fastHeld && !keyBoostHeld) playSfx("boost", 0.45);
 }
 
 function primaryAction() {
+  if (phase === "playing" && paused) return; // no picks while paused
   if (phase === "menu" || phase === "gameover") {
     if (phase === "gameover" && restartLock > 0) return; // misclick guard
     startRun();
@@ -407,7 +413,7 @@ glCanvas.addEventListener("mousedown", e => {
   if (CALIBRATING) return; // clicks only report coordinates in this mode
   if (e.button === 2) {
     // sound only mid-run: no boost whoosh on the menu/game-over screens
-    if (!fastHeld && !boostLocked && phase === "playing") playSfx("boost", 0.45);
+    if (!fastHeld && !keyBoostHeld && !boostLocked && phase === "playing" && !paused) playSfx("boost", 0.45);
     fastHeld = true;
     return;
   }
@@ -427,13 +433,32 @@ glCanvas.addEventListener("touchstart", e => {
   primaryAction();
 }, { passive: false });
 
+// desktop hover tracking for button tooltips
+glCanvas.addEventListener("mousemove", e => {
+  hoverBtn = hitButton(e.clientX, e.clientY);
+});
+
 window.addEventListener("mouseup", e => {
   if (e.button === 2) fastHeld = false;
 });
-window.addEventListener("blur", () => { fastHeld = false; });
+window.addEventListener("keyup", e => {
+  if (e.key === "s" || e.key === "S") keyBoostHeld = false;
+});
+window.addEventListener("blur", () => { fastHeld = false; keyBoostHeld = false; });
 
 window.addEventListener("keydown", e => {
   if (e.key === "r" || e.key === "R") startRun();
+  if ((e.key === "t" || e.key === "T") && !e.repeat) pressButton("boost");
+  if ((e.key === "p" || e.key === "P") && phase === "playing") {
+    paused = !paused;
+    if (musicEl) { if (paused) musicEl.pause(); else musicEl.play().catch(() => {}); }
+  }
+  if ((e.key === "s" || e.key === "S") && !e.repeat) {
+    if (!fastHeld && !keyBoostHeld && !boostLocked && phase === "playing" && !paused) {
+      playSfx("boost", 0.45);
+    }
+    keyBoostHeld = true;
+  }
   if (e.code === "Space" && !e.repeat) {
     e.preventDefault(); // avoid page scroll / re-activating focused buttons
     primaryAction();    // equivalent to a left click
@@ -505,7 +530,7 @@ function update(dt) {
     slarkNext = 2 + Math.random() * 3;
   }
 
-  if (phase !== "playing") return;
+  if (phase !== "playing" || paused) return;
 
   elapsed += dt;
   timeLeft -= dt;
@@ -526,7 +551,7 @@ function update(dt) {
   // boost multiplier compounds while RMB is held, decays when released.
   // It is pinned at 1x for the duration of the miss penalty.
   if (missState === 0) {
-    if (fastHeld || boostLocked) {
+    if (fastHeld || keyBoostHeld || boostLocked) {
       boostMult = Math.min(MAX_SPEED_MULT, boostMult * (1 + BOOST_RAMP * dt));
     } else {
       boostMult = Math.max(1, boostMult * (1 - BOOST_DECAY * dt));
@@ -1150,6 +1175,18 @@ function drawUI() {
   // overlays
   if (phase === "menu") {
     drawMenuOverlay();
+  } else if (phase === "playing" && paused) {
+    ui.fillStyle = "rgba(8,7,9,0.6)";
+    ui.fillRect(0, 0, W, H);
+    ui.textAlign = "center";
+    ui.textBaseline = "middle";
+    const pSize = Math.round(R_LOCK * 0.16);
+    ui.font = `700 ${pSize}px ${FONT}`;
+    ui.fillStyle = vGradText("#f4e6c0", "#a8925f", CY - R_LOCK * 0.1, pSize);
+    ui.fillText("PAUSED", CX, CY - R_LOCK * 0.1);
+    ui.font = `500 ${Math.round(R_LOCK * 0.07)}px ${FONT}`;
+    ui.fillStyle = "#cfc4a6";
+    ui.fillText("Press P to resume", CX, CY + R_LOCK * 0.08);
   } else if (phase === "gameover") {
     drawOverlayText(
       (won ? "Unlocked! " : "The lock holds\u2026 ") + "Final score: " + score.toLocaleString(),
@@ -1197,6 +1234,38 @@ function drawButtons() {
     ui.lineTo(pos.x + BTN_R * 0.55, pos.y - BTN_R * 0.55);
     ui.stroke();
   }
+
+  const labelFs = Math.max(9, Math.round(BTN_R * 0.38));
+  if (IS_TOUCH) {
+    // touch devices: persistent labels beside the action buttons
+    ui.font = `600 ${labelFs}px ${FONT}`;
+    ui.fillStyle = "rgba(217,193,138,0.75)";
+    ui.textBaseline = "middle";
+    ui.textAlign = "left";
+    ui.fillText("RESTART", b.restart.x + BTN_R + 8, b.restart.y);
+    ui.textAlign = "right";
+    ui.fillText("TOGGLE BOOST", b.boost.x - BTN_R - 8, b.boost.y);
+    ui.textAlign = "center";
+  } else if (hoverBtn === "restart" || hoverBtn === "boost") {
+    // desktop: tooltip above the hovered button
+    const pos = b[hoverBtn];
+    const text = hoverBtn === "restart" ? "Restart (R)" : "TOGGLE BOOST (T)";
+    ui.font = `500 ${labelFs}px ${FONT}`;
+    const tw = ui.measureText(text).width;
+    const tipX = Math.min(Math.max(pos.x, SX + tw / 2 + 10), SX + SW - tw / 2 - 10);
+    const tipY = pos.y - BTN_R - 16;
+    ui.fillStyle = "rgba(10,8,6,0.9)";
+    ui.beginPath();
+    ui.roundRect(tipX - tw / 2 - 8, tipY - labelFs, tw + 16, labelFs * 2, 5);
+    ui.fill();
+    ui.strokeStyle = "rgba(201,169,79,0.5)";
+    ui.lineWidth = 1;
+    ui.stroke();
+    ui.fillStyle = "#d9c18a";
+    ui.textAlign = "center";
+    ui.textBaseline = "middle";
+    ui.fillText(text, tipX, tipY);
+  }
 }
 
 function drawMouseIcon(x, y, side, sz) {
@@ -1216,6 +1285,40 @@ function drawMouseIcon(x, y, side, sz) {
   ui.restore();
 }
 
+function drawKeyIcon(x, y, label, sz) {
+  const wide = label.length > 1;
+  const w = wide ? sz * 2.8 : sz * 1.5;
+  const h = sz * 1.25;
+  ui.save();
+  ui.translate(x, y);
+  ui.fillStyle = "#45413a";
+  ui.beginPath();
+  ui.roundRect(-w / 2, -h / 2, w, h, 3);
+  ui.fill();
+  ui.strokeStyle = "rgba(232,221,192,0.5)";
+  ui.lineWidth = 1;
+  ui.stroke();
+  ui.fillStyle = "#e8ddc0";
+  ui.font = `600 ${Math.round(sz * (wide ? 0.55 : 0.75))}px ${FONT}`;
+  ui.textAlign = "center";
+  ui.textBaseline = "middle";
+  ui.fillText(label, 0, 1);
+  ui.restore();
+}
+
+function drawIconStack(x, centerY, icons, fs) {
+  const hs = icons.map(ic => (ic.type === "mouse" ? fs * 1.8 : fs * 1.25));
+  const gap = fs * 0.5;
+  const total = hs.reduce((a, b) => a + b, 0) + gap * (icons.length - 1);
+  let cy = centerY - total / 2;
+  icons.forEach((ic, i) => {
+    const c = cy + hs[i] / 2;
+    if (ic.type === "mouse") drawMouseIcon(x, c, ic.side, fs);
+    else drawKeyIcon(x, c, ic.label, fs);
+    cy += hs[i] + gap;
+  });
+}
+
 function drawMenuOverlay() {
   ui.fillStyle = "rgba(8,7,9,0.62)";
   ui.fillRect(0, 0, W, H);
@@ -1224,35 +1327,46 @@ function drawMenuOverlay() {
   const fs = Math.max(11, Math.round(SW * 0.024));
   const lh = fs * 1.4;
   const bx = CX - SW * 0.29;   // left edge of the text block
-  const tx = bx + fs * 2.4;    // indent for icon sections
-  let y = SY + SH * 0.30;
+  const ix = bx + fs * 0.7;    // icon gutter center
+  const tx = bx + fs * 2.4;    // text indent
+  let y = SY + SH * 0.26;
 
   ui.textAlign = "left";
   ui.textBaseline = "middle";
   ui.fillStyle = "#cfc4a6";
   ui.font = `500 ${fs}px ${FONT}`;
   ui.fillText("Successfully pick the lock as many times", bx, y); y += lh;
-  ui.fillText("as you can before time runs out.", bx, y); y += lh * 1.7;
+  ui.fillText("as you can before time runs out.", bx, y); y += lh * 1.8;
 
-  drawMouseIcon(bx + fs * 0.7, y, "L", fs);
-  ui.fillStyle = "#d9c18a";
-  ui.font = `700 ${fs}px ${FONT}`;
-  ui.fillText("PICK", tx, y); y += lh;
-  ui.fillStyle = "#cfc4a6";
-  ui.font = `500 ${fs}px ${FONT}`;
-  ui.fillText("Activate the lock pick when it", tx, y); y += lh;
-  ui.fillText("reaches the highlighted bar.", tx, y); y += lh * 1.5;
-  ui.fillText("Missing the bar briefly disables", tx, y); y += lh;
-  ui.fillText("the pick.", tx, y); y += lh * 1.5;
-  ui.fillText("Blue bars grant additional time.", tx, y); y += lh * 1.8;
+  // one section = an icon stack vertically centered against its text block
+  const section = (icons, title, lines) => {
+    const rows = 1 + lines.length;
+    drawIconStack(ix, y + ((rows - 1) * lh) / 2, icons, fs);
+    ui.textAlign = "left";
+    ui.textBaseline = "middle";
+    ui.fillStyle = "#d9c18a";
+    ui.font = `700 ${fs}px ${FONT}`;
+    ui.fillText(title, tx, y); y += lh;
+    ui.fillStyle = "#cfc4a6";
+    ui.font = `500 ${fs}px ${FONT}`;
+    for (const line of lines) { ui.fillText(line, tx, y); y += lh; }
+    y += lh * 0.9;
+  };
 
-  drawMouseIcon(bx + fs * 0.7, y, "R", fs);
-  ui.fillStyle = "#d9c18a";
-  ui.font = `700 ${fs}px ${FONT}`;
-  ui.fillText("SPEED BOOST (HOLD)", tx, y); y += lh;
-  ui.fillStyle = "#cfc4a6";
-  ui.font = `500 ${fs}px ${FONT}`;
-  ui.fillText("Hold for continuous speed boost.", tx, y);
+  section([{ type: "mouse", side: "L" }, { type: "key", label: "SPACE" }], "PICK", [
+    "Activate the lock pick when it",
+    "reaches the highlighted bar.",
+    "Missing the bar briefly disables the pick.",
+    "Blue bars grant additional time.",
+  ]);
+  section([{ type: "mouse", side: "R" }, { type: "key", label: "S" }],
+    "SPEED BOOST (HOLD)", ["Hold for continuous speed boost."]);
+  section([{ type: "key", label: "T" }],
+    "SPEED BOOST (TOGGLE)", ["Toggle continuous speed boost."]);
+  section([{ type: "key", label: "R" }],
+    "RESTART", ["Restart the run at any time."]);
+  section([{ type: "key", label: "P" }],
+    "PAUSE", ["Pause and resume the run."]);
 
   const blink = 0.6 + 0.4 * Math.sin(performance.now() / 300);
   ui.globalAlpha = blink;

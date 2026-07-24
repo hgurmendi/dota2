@@ -64,8 +64,9 @@ recovering, and the boost is forfeited. When the clock runs out the run ends:
   GLSL ring segments with the lock texture composited in. Blue wedges pulsate.
 - Fonts, art, and audio are extracted from the game's files (Radiance /
   RadianceM for text; music, stingers, and Slark voice lines for audio).
-- Inputs: LMB/tap/Space = pick, RMB hold or on-screen toggle = boost,
-  R / ↻ = restart. Separate mute toggles for effects and music/voice.
+- Inputs: LMB/tap/Space = pick, RMB/S hold = boost, T or the on-screen
+  toggle = boost lock, R / ↻ = restart, P = pause. Separate mute toggles
+  for effects and music/voice.
 
 ## Attribution
 
