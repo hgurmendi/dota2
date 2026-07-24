@@ -56,11 +56,12 @@ const BOOST_RAMP      = 6 * 0.12 * 1.4; // m_flSpeedBoostRate * m_flSpeedBoostPe
                                       // scaled 1.4x by feel: multiplier compounds at ~1x/s
                                       // while held, hitting the 3.2x cap in ~1.1s
 const BOOST_DECAY     = 2.5;          // release decay (not in vdata; tuned to feel snappy)
-const MISS_STALL      = 0.3;          // dwell at full stop after a miss (not in vdata; tuned)
-// Miss penalty: the needle stops dead instantly, stalls briefly, then snaps back
-// up to speed. (vdata has m_flDecelerationRate=3 / m_flRecoverRate=60 but the
-// exact formulas are compiled; these are tuned to match the real game's feel.)
-const RECOVER_ACCEL   = 180 * DEG;    // deg/s^2 back up to speed (~0.22s to base)
+const MISS_STALL      = 0.5;          // seconds crawling after a miss (not in vdata; tuned)
+const MISS_CRAWL      = BASE_SPEED * 0.35; // crawl speed while penalized, well below base
+// Miss penalty: the needle instantly drops to a slow crawl for MISS_STALL
+// seconds, then accelerates quickly back up. (vdata has m_flDecelerationRate=3
+// / m_flRecoverRate=60 but the exact formulas are compiled; tuned by feel.)
+const RECOVER_ACCEL   = 320 * DEG;    // deg/s^2 back up to speed
 const WEDGE_SIZE      = 2 * Math.asin(40 / 180); // m_nUnlockRadius=40 is a circle radius in
                                       // board units (m_nBoardRadius=180): ~25.7 deg of arc.
                                       // Verified by measuring wedges in a gameplay screenshot
@@ -176,11 +177,10 @@ let blueChance;               // escalating pity chance for blue wedges
 let fastHeld = false;
 let spawnTimer;
 let arcs = [];                // {center, half, color}
-let floaters = [];            // {x, y, text, color, age}
 let centerFloaters = [];      // "+1.5" style popups on the dial {text, color, age}
 let sparkles = [];            // needle trail + capture bursts
                               // {x, y, vx, vy, age, life, size, color:[r,g,b], drag, grav}
-let timerPulse = 0;
+let displayScore = 0;         // rolls up continuously toward the real score
 let best = 0;
 let restartLock = 0;          // seconds after losing during which clicks can't restart
 let boostLocked = false;      // on-screen toggle equivalent to holding RMB
@@ -190,6 +190,7 @@ let shankBaseY = 0;           // shackle rest position, set in layout()
 let slarkRestY = 0, armRestY = 0; // idle-bob rest positions, set in layout()
 let sparkT = 1e9;             // time since the last miss spark flash
 let sparkX = 0, sparkY = 0, sparkRot = 0;
+let shockT = 1e9;             // time since the last miss (shake + red wash)
 
 function reset() {
   timeLeft = START_TIME;
@@ -204,13 +205,13 @@ function reset() {
   blueChance = BLUE_BASE_CHANCE;
   spawnTimer = 0.4;
   arcs = [];
-  floaters = [];
   centerFloaters = [];
   sparkles = [];
-  timerPulse = 0;
+  displayScore = 0;
   won = false;
   shankPop = 0;
   sparkT = 1e9;
+  shockT = 1e9;
   // boostLocked deliberately survives restarts
 }
 
@@ -299,7 +300,8 @@ function trySpawnArc() {
       // escalating pity: each yellow spawn raises the blue chance until one lands
       const isBlue = Math.random() < blueChance;
       blueChance = isBlue ? BLUE_BASE_CHANCE : blueChance + BLUE_ESCALATION;
-      arcs.push({ center, half, half0: half, color: isBlue ? "blue" : "yellow" });
+      arcs.push({ center, half, half0: half, color: isBlue ? "blue" : "yellow",
+                  phase: Math.random() * TAU });
       return;
     }
   }
@@ -359,33 +361,27 @@ function primaryAction() {
     playSfx("success", 0.6);
     if (arc.color === "blue") {
       timeLeft += BLUE_TIME_BONUS;
-      timerPulse = 1;
-      centerFloaters.push({ text: "+" + BLUE_TIME_BONUS.toFixed(1), color: "#7fd0ff", age: 0 });
+      centerFloaters.push({ text: "+" + BLUE_TIME_BONUS.toFixed(1), age: 0 });
     }
     dir = -dir;      // reverse direction, same speed
     missState = 0;   // capturing clears any slow penalty
     curSpeed = BASE_SPEED * boostMult;
-    const fr = (R_WEDGE_IN + R_WEDGE_OUT) / 2;
-    floaters.push({
-      x: CX + Math.cos(arc.center) * fr,
-      y: CY - Math.sin(arc.center) * fr,
-      text: "+" + HIT_SCORE, color: "#ffe98a", age: 0,
-    });
     spawnBurst(angle, arc.color);
     slarkReact = 0.35;
     arcs.splice(hitIndex, 1);
   } else {
-    // miss: instant dead stop, brief stall, then quick recovery.
+    // miss: instant drop to a crawl, brief hold, then quick recovery.
     // Boost is forfeited — it must recompound from 1x after recovery.
     // Clicks during an active penalty are ignored (no vdata cooldown param
     // exists; the penalty itself is the minimum interval between misses).
     if (missState !== 0) return;
-    curSpeed = 0;
+    curSpeed = MISS_CRAWL;
     missState = 2;
     stallTimer = MISS_STALL;
     boostMult = 1;
     playSfx("miss", 0.6);
     spawnMissBurst(angle);
+    shockT = 0;
   }
 }
 
@@ -407,7 +403,8 @@ if (CALIBRATING) {
 glCanvas.addEventListener("mousedown", e => {
   if (CALIBRATING) return; // clicks only report coordinates in this mode
   if (e.button === 2) {
-    if (!fastHeld && !boostLocked) playSfx("boost", 0.45); // already boosting = no sound
+    // sound only mid-run: no boost whoosh on the menu/game-over screens
+    if (!fastHeld && !boostLocked && phase === "playing") playSfx("boost", 0.45);
     fastHeld = true;
     return;
   }
@@ -434,15 +431,15 @@ window.addEventListener("blur", () => { fastHeld = false; });
 
 window.addEventListener("keydown", e => {
   if (e.key === "r" || e.key === "R") startRun();
+  if (e.code === "Space" && !e.repeat) {
+    e.preventDefault(); // avoid page scroll / re-activating focused buttons
+    primaryAction();    // equivalent to a left click
+  }
 });
 
 // ---------- Update ----------
 function update(dt) {
   // effects keep animating even on menu/gameover screens
-  for (let i = floaters.length - 1; i >= 0; i--) {
-    floaters[i].age += dt;
-    if (floaters[i].age > 1.1) floaters.splice(i, 1);
-  }
   for (let i = centerFloaters.length - 1; i >= 0; i--) {
     centerFloaters[i].age += dt;
     if (centerFloaters[i].age > 1.0) centerFloaters.splice(i, 1);
@@ -459,8 +456,15 @@ function update(dt) {
     s.y += s.vy * dt;
     if (s.age > s.life) sparkles.splice(i, 1);
   }
-  timerPulse = Math.max(0, timerPulse - dt * 2.5);
   restartLock = Math.max(0, restartLock - dt);
+
+  // score counter rolls up smoothly (~0.25s per capture)
+  if (displayScore < score) {
+    displayScore = Math.min(score,
+      displayScore + Math.max(2500, (score - displayScore) * 4) * dt);
+  } else if (displayScore > score) {
+    displayScore = score;
+  }
 
   // candle flames: continuous stream of rising, shrinking warm particles
   if (flameEmit.length) {
@@ -483,6 +487,7 @@ function update(dt) {
   }
 
   sparkT += dt;
+  shockT += dt;
 
   // shackle pries open on a win
   const popTarget = (phase === "gameover" && won) ? 1 : 0;
@@ -527,7 +532,7 @@ function update(dt) {
   const targetSpeed = BASE_SPEED * boostMult;
 
   if (missState === 2) {
-    // dwell at a full stop so the miss reads clearly
+    // crawl well below base speed so the miss reads clearly
     stallTimer -= dt;
     if (stallTimer <= 0) missState = 3;
   } else if (missState === 3) {
@@ -929,12 +934,19 @@ function syncScene() {
 
   // arm idle wiggle around the shoulder pivot, plus a quick jitter on capture
   const tNow = performance.now() / 1000;
-  armMesh.rotation.z = 0.5 + 0.08 * Math.sin(tNow * 1.7) + 0.18 * slarkReact * Math.sin(tNow * 22);
+  // shock from a miss: rapid judder that decays over ~0.22s
+  const shock = Math.max(0, 1 - shockT / 0.22);
+  armMesh.rotation.z = 0.5 + 0.08 * Math.sin(tNow * 1.7) + 0.18 * slarkReact * Math.sin(tNow * 22)
+                     + 0.14 * shock * Math.sin(tNow * 50);
 
-  // slark bobs gently in the window; the arm rides along with him
-  const bob = Math.sin(tNow * 1.4) * SW * 0.005;
+  // slark bobs gently in the window; the arm rides along with him.
+  // A miss makes him judder rapidly, and the whole scene shakes with him
+  const bob = Math.sin(tNow * 1.4) * SW * 0.005
+            + shock * SW * 0.009 * Math.sin(tNow * 58);
   slarkMesh.position.y = slarkRestY + bob;
   armMesh.position.y = armRestY + bob;
+  scene.position.x = shock * SW * 0.004 * Math.sin(tNow * 41 + 1);
+  scene.position.y = shock * SW * 0.006 * Math.sin(tNow * 47);
 
   // candle halos + cores flicker gently, out of phase with each other
   flameHalo1.material.opacity = 0.42 + 0.1 * Math.sin(tNow * 9.3) * Math.sin(tNow * 5.1);
@@ -960,8 +972,11 @@ function syncScene() {
       m.material.uniforms.uC0.value.set(...cset.c0);
       m.material.uniforms.uC1.value.set(...cset.c1);
       m.material.uniforms.uC2.value.set(...cset.c2);
-      // very bright when fresh, darkening as the wedge shrinks away
-      m.material.uniforms.uBright.value = 0.5 + 0.75 * (a.half / a.half0);
+      // very bright when fresh, darkening as the wedge shrinks away;
+      // blue (time) wedges additionally pulsate their intensity
+      let bright = 0.65 + 0.8 * (a.half / a.half0);
+      if (a.color === "blue") bright *= 1.08 + 0.2 * Math.sin(tNow * 5.5 + a.phase);
+      m.material.uniforms.uBright.value = bright;
     } else {
       m.visible = false;
     }
@@ -1031,38 +1046,29 @@ function smallCaps(text, x, y, sizePx, color, spacing) {
   ui.textAlign = "center";
 }
 
-function drawFrame() {
-  const t = Math.max(5, SW * 0.014);
-  ui.strokeStyle = "#0e0b08";
-  ui.lineWidth = t;
-  ui.strokeRect(SX + t / 2, SY + t / 2, SW - t, SH - t);
-  ui.strokeStyle = "rgba(255,255,255,0.05)";
-  ui.lineWidth = 1;
-  ui.strokeRect(SX + t, SY + t, SW - 2 * t, SH - 2 * t);
-  // corner screws, barely lighter than the bezel
-  ui.fillStyle = "#221c15";
-  for (const [rx, ry] of [[SX + t, SY + t], [SX + SW - t, SY + t],
-                          [SX + t, SY + SH - t], [SX + SW - t, SY + SH - t]]) {
-    ui.beginPath();
-    ui.arc(rx, ry, t * 0.55, 0, TAU);
-    ui.fill();
-  }
+// metallic text fill: lighter on top, darker toward the bottom
+function vGradText(top, bottom, cy, sizePx) {
+  const g = ui.createLinearGradient(0, cy - sizePx * 0.5, 0, cy + sizePx * 0.5);
+  g.addColorStop(0, top);
+  g.addColorStop(1, bottom);
+  return g;
 }
 
 function drawSign() {
   const signW = SW * 0.40; // matches the live game's sign-to-stage ratio
   const signH = signW * (signImg.height / signImg.width);
   const signY = SY - signH * 0.06; // chains run off the top of the stage
-  // gentle sway on its chains, pivoting where they leave the stage top
-  const rock = 0.02 * Math.sin(performance.now() / 1000 * 0.9);
+  // very subtle horizontal drift on its chains (no rotation, no bob)
+  const sway = SW * 0.003 * Math.sin(performance.now() / 1000 * 0.8);
   ui.save();
-  ui.translate(CX, signY);
-  ui.rotate(rock);
+  ui.translate(CX + sway, signY);
   ui.drawImage(signImg, -signW / 2, 0, signW, signH);
   ui.textAlign = "center";
   ui.textBaseline = "middle";
-  ui.font = `700 ${Math.round(signW * 0.085)}px ${FONT}`;
-  ui.fillStyle = "#d9c18a";
+  const titleSize = Math.round(signW * 0.085);
+  ui.font = `700 ${titleSize}px ${FONT}`;
+  // inverted metal: darker on top, brighter toward the bottom
+  ui.fillStyle = vGradText("#a8925f", "#f4e6c0", signH * 0.70, titleSize);
   ui.shadowColor = "#000";
   ui.shadowBlur = 6;
   ui.fillText("PICK THE LOCK", 0, signH * 0.70);
@@ -1082,51 +1088,51 @@ function drawUI() {
     return;
   }
 
-  drawFrame();
   drawSign();
 
   // center text: +bonus / TIME REMAINING / time / SCORE / score
   if (phase !== "menu") {
+    // the dial text shakes with the scene during the miss shock
+    const uiT = performance.now() / 1000;
+    const uiShock = Math.max(0, 1 - shockT / 0.22);
+    ui.save();
+    ui.translate(uiShock * SW * 0.004 * Math.sin(uiT * 41 + 1),
+                 uiShock * SW * 0.006 * Math.sin(uiT * 47) - R_DIAL * 0.07);
     ui.textAlign = "center";
     ui.textBaseline = "middle";
 
     for (const f of centerFloaters) {
       const k = f.age / 1.0;
+      const fy = CY - R_DIAL * 0.52 - k * 14;
+      const fSize = Math.round(R_DIAL * 0.2);
       ui.globalAlpha = 1 - k;
-      ui.font = `600 ${Math.round(R_DIAL * 0.2)}px ${FONT_NUM}`;
-      ui.fillStyle = f.color;
-      ui.fillText(f.text, CX, CY - R_DIAL * 0.52 - k * 14);
+      ui.font = `600 ${fSize}px ${FONT_NUM}`;
+      ui.fillStyle = vGradText("#f4e6c0", "#a8925f", fy, fSize); // matches the timer
+      ui.fillText(f.text, CX, fy);
       ui.globalAlpha = 1;
     }
 
-    smallCaps("TIME REMAINING", CX, CY - R_DIAL * 0.26, Math.round(R_DIAL * 0.11), "#8d8578", 2);
+    smallCaps("TIME REMAINING", CX, CY - R_DIAL * 0.26, Math.round(R_DIAL * 0.11), "#b59a63", 2);
 
-    const pulse = timerPulse;
-    let timerColor = "#efe9dc";
-    if (pulse > 0) timerColor = "#6effa1";
-    else if (phase === "playing" && timeLeft < 5) timerColor = "#ff6b6b";
-    ui.font = `600 ${Math.round(R_DIAL * 0.5)}px ${FONT_NUM}`;
-    ui.fillStyle = timerColor;
-    ui.shadowColor = timerColor;
-    ui.shadowBlur = pulse > 0 ? 22 * pulse : 6;
+    const timerTop = "#f4e6c0", timerBot = "#a8925f"; // warm golden metal, always
+    const tSize = Math.round(R_DIAL * 0.5);
+    ui.font = `600 ${tSize}px ${FONT_NUM}`;
+    ui.fillStyle = vGradText(timerTop, timerBot, CY + R_DIAL * 0.06, tSize);
     ui.fillText(timeLeft.toFixed(1), CX, CY + R_DIAL * 0.06);
-    ui.shadowBlur = 0;
 
-    smallCaps("SCORE", CX, CY + R_DIAL * 0.42, Math.round(R_DIAL * 0.11), "#8d8578", 2);
-    ui.font = `600 ${Math.round(R_DIAL * 0.22)}px ${FONT_NUM}`;
-    ui.fillStyle = "#ffe98a";
-    ui.fillText(score.toLocaleString(), CX, CY + R_DIAL * 0.66);
+    smallCaps("SCORE", CX, CY + R_DIAL * 0.42, Math.round(R_DIAL * 0.11), "#b59a63", 2);
+    const sSize = Math.round(R_DIAL * 0.22);
+    ui.font = `600 ${sSize}px ${FONT_NUM}`;
+    ui.fillStyle = vGradText("#eeda9f", "#8b8cc4", CY + R_DIAL * 0.66, sSize); // gold into blue-purple
+    ui.fillText(Math.round(displayScore).toLocaleString(), CX, CY + R_DIAL * 0.66);
+    ui.restore();
   }
 
-  // floating score texts over the ring
-  for (const f of floaters) {
-    const k = f.age / 1.1;
-    ui.globalAlpha = 1 - k;
-    ui.font = `700 ${Math.round(R_LOCK * 0.09)}px ${FONT}`;
-    ui.fillStyle = f.color;
-    ui.textAlign = "center";
-    ui.fillText(f.text, f.x, f.y - k * 40);
-    ui.globalAlpha = 1;
+  // brief red wash over the stage while the miss shock lasts
+  const shockK = Math.max(0, 1 - shockT / 0.22);
+  if (shockK > 0) {
+    ui.fillStyle = `rgba(210, 36, 22, ${(0.22 * shockK).toFixed(3)})`;
+    ui.fillRect(SX, SY, SW, SH);
   }
 
   // overlays
@@ -1201,7 +1207,6 @@ function drawMouseIcon(x, y, side, sz) {
 function drawMenuOverlay() {
   ui.fillStyle = "rgba(8,7,9,0.62)";
   ui.fillRect(0, 0, W, H);
-  drawFrame();
   drawSign();
 
   const fs = Math.max(11, Math.round(SW * 0.024));
@@ -1249,7 +1254,6 @@ function drawMenuOverlay() {
 function drawOverlayText(line1, line2, cta) {
   ui.fillStyle = "rgba(8,7,9,0.55)";
   ui.fillRect(0, 0, W, H);
-  drawFrame();
   drawSign(); // keep the title bright above the dim layer
 
   ui.textAlign = "center";
