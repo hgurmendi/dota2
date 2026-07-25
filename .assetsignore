@@ -1,0 +1,35 @@
+# Files under the assets directory (the repo root) that must NOT be uploaded
+# as public static assets. Same syntax as .gitignore; Wrangler skips anything
+# matching, so these are never published rather than merely unreachable.
+#
+# This replaces the old Pages approach of deleting files during the build.
+# Nothing here is destructive, and it is version-controlled alongside the code
+# it protects.
+
+# server code — runs in the Worker, is not part of the site
+worker/
+leaderboard/
+
+# deployment + tooling config
+wrangler.toml
+package.json
+package-lock.json
+node_modules/
+.wrangler/
+.assetsignore
+deploy-clean.sh
+.github/
+
+# docs and tests
+*.md
+*.test.mjs
+*.sql
+
+# local secrets, should never exist in a deploy but belt and braces
+.dev.vars
+.dev.vars.example
+
+# meta
+.git/
+.gitignore
+.DS_Store

@@ -1,0 +1,22 @@
+# Runs the engine determinism suite and the auth suite on every push and PR.
+#
+# Deploys are gated separately by `[build] command = "npm test"` in
+# wrangler.toml, which Workers Builds runs before publishing. This workflow
+# exists so a failure shows up on the commit rather than only at deploy time.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # No install step: both suites are dependency-free and run on plain node.
+      - run: npm test

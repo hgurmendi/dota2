@@ -1,26 +1,23 @@
-// Cloudflare Worker adapter: one Worker serves both the static site and the
-// API. The alternative is Pages Functions (../functions/api/[[path]].js) —
-// same handler either way, so the hosting choice stays reversible.
+// The Worker: one deployment serving both the static game and the leaderboard
+// API. All the logic lives in ../leaderboard/handlers.js as a plain
+// (Request, env) -> Response, so nothing here is Cloudflare-specific beyond
+// the ASSETS binding.
 //
-// The site root is the repo root, so `assets.directory` in wrangler.toml is
-// "." and the server source would otherwise be served as static files. Nothing
-// there is secret — every credential comes from env — but there is no reason
-// to publish it, so those paths are claimed here and refused. wrangler.toml
-// lists them in run_worker_first so assets can't answer first.
-import { handle } from "../leaderboard/handlers.js";
+// Server source is kept off the public site by .assetsignore, which excludes
+// it from the upload entirely — there is deliberately no path-blocking code
+// here. A guard would only fire if the Worker ran before assets, and making
+// that happen (run_worker_first) would bill an invocation for every static
+// request it covered, to protect files that are already not published.
 
-const PRIVATE = ["/leaderboard/", "/worker/", "/functions/"];
+import { handle } from "../leaderboard/handlers.js";
 
 export default {
   async fetch(request, env) {
     const { pathname } = new URL(request.url);
-
     if (pathname === "/api" || pathname.startsWith("/api/")) {
       return handle(request, env);
     }
-    if (PRIVATE.some((p) => pathname.startsWith(p)) || pathname === "/wrangler.toml") {
-      return new Response("Not found", { status: 404 });
-    }
+    // Anything else: a static asset, or a 404 from the asset server.
     return env.ASSETS.fetch(request);
   },
 };

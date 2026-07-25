@@ -1,0 +1,15 @@
+# Copy to .dev.vars (gitignored) for `wrangler dev`. These are the same two
+# values that are set as encrypted secrets in production with
+# `wrangler secret put NAME` — they are never stored in the repo.
+#
+# Both plain `node leaderboard/dev-server.mjs` and `wrangler dev` read them;
+# the plain server takes them from the environment instead:
+#   SESSION_SECRET=... STEAM_API_KEY=... npm run dev
+
+# HMAC key for session cookies. Generate with: openssl rand -base64 32
+# Rotating this invalidates every existing session.
+SESSION_SECRET="replace-me"
+
+# Steam Web API key from https://steamcommunity.com/dev/apikey
+# Optional: without it login still works, but there is no persona or avatar.
+STEAM_API_KEY=""

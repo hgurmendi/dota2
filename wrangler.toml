@@ -1,33 +1,51 @@
-# Cloudflare Worker deployment — only used if the Worker route is chosen over
-# Pages. Harmless to leave in place otherwise: Pages ignores it.
+# Cloudflare Worker: serves the static site and the leaderboard API from one
+# deployment. See issue #2 for the plan and DEPLOY.md for the setup checklist.
 #
-# Setup (see issue #2):
-#   wrangler d1 create pickthelock          # paste database_id below
-#   wrangler d1 execute pickthelock --remote --file=leaderboard/schema.sql
-#   wrangler secret put SESSION_SECRET      # openssl rand -base64 32
-#   wrangler secret put STEAM_API_KEY       # steamcommunity.com/dev/apikey
-#   wrangler deploy
-#
-# SESSION_SECRET and STEAM_API_KEY are secrets and must never be added to the
-# [vars] block below — anything in this file is committed to the repo.
+# Everything that can live in version control does. The only things that can't
+# are the two secrets — Cloudflare stores those encrypted and never returns
+# them, so they are set once with `wrangler secret put` (see DEPLOY.md) and
+# must never appear in this file, which is committed.
 
 name = "pickthelock"
 main = "worker/index.js"
 compatibility_date = "2026-07-01"
 
+# The site root is the repo root. .assetsignore keeps server code, docs, tests
+# and tooling out of the upload entirely, so only the actual site is published.
 [assets]
 directory = "."
 binding = "ASSETS"
-# Assets are served before the Worker runs, so any path the Worker needs to
-# control must be listed here. /api/* is the API; the rest is server source
-# that happens to sit inside the asset directory (the site root is the repo
-# root) and is 404'd in index.js rather than published.
-run_worker_first = ["/api/*", "/leaderboard/*", "/worker/*", "/functions/*", "/wrangler.toml"]
+# The Worker owns /api/*; every other path is answered from static assets
+# without invoking it, which is both faster and not billed.
+run_worker_first = ["/api/*"]
 
-# [vars]
-# SITE_ORIGIN = "https://example.com"   # only if the public origin differs
+[observability]
+enabled = true
 
+# Runs before every deploy, locally and in Workers Builds. The leaderboard
+# rests on a run being reproducible from its seed and inputs, so a change that
+# breaks determinism must not be deployable — a failing command fails the
+# deploy. This replaces the test gate that lived in the old Pages build script.
+[build]
+command = "npm test"
+
+# Uncomment once the database exists:
+#   wrangler d1 create pickthelock
+#   wrangler d1 execute pickthelock --remote --file=leaderboard/schema.sql
+# database_id is an identifier, not a credential, so it belongs in the repo.
 # [[d1_databases]]
 # binding = "DB"
 # database_name = "pickthelock"
-# database_id = "<from `wrangler d1 create`>"
+# database_id = "<paste from `wrangler d1 create`>"
+
+# Uncomment to serve the Worker from the real domain. Until then it is
+# reachable at <name>.<subdomain>.workers.dev.
+# [[routes]]
+# pattern = "example.com"
+# custom_domain = true
+
+# [vars] holds non-secret configuration only.
+# SITE_ORIGIN is needed when the public origin differs from the request origin
+# (behind a proxy, or to pin the OpenID return_to to the canonical domain).
+# [vars]
+# SITE_ORIGIN = "https://example.com"
