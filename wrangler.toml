@@ -1,0 +1,33 @@
+# Cloudflare Worker deployment — only used if the Worker route is chosen over
+# Pages. Harmless to leave in place otherwise: Pages ignores it.
+#
+# Setup (see issue #2):
+#   wrangler d1 create pickthelock          # paste database_id below
+#   wrangler d1 execute pickthelock --remote --file=leaderboard/schema.sql
+#   wrangler secret put SESSION_SECRET      # openssl rand -base64 32
+#   wrangler secret put STEAM_API_KEY       # steamcommunity.com/dev/apikey
+#   wrangler deploy
+#
+# SESSION_SECRET and STEAM_API_KEY are secrets and must never be added to the
+# [vars] block below — anything in this file is committed to the repo.
+
+name = "pickthelock"
+main = "worker/index.js"
+compatibility_date = "2026-07-01"
+
+[assets]
+directory = "."
+binding = "ASSETS"
+# Assets are served before the Worker runs, so any path the Worker needs to
+# control must be listed here. /api/* is the API; the rest is server source
+# that happens to sit inside the asset directory (the site root is the repo
+# root) and is 404'd in index.js rather than published.
+run_worker_first = ["/api/*", "/leaderboard/*", "/worker/*", "/functions/*", "/wrangler.toml"]
+
+# [vars]
+# SITE_ORIGIN = "https://example.com"   # only if the public origin differs
+
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "pickthelock"
+# database_id = "<from `wrangler d1 create`>"
