@@ -11,6 +11,12 @@ name = "dota2"
 main = "worker/index.js"
 compatibility_date = "2026-07-01"
 
+# One origin, deliberately. The OpenID return_to is built from whichever origin
+# a request arrives on, so leaving workers.dev live would mean sessions and
+# Steam logins belonging to a second, unadvertised copy of the site.
+# (Top level on purpose: inside [[routes]] this is not a valid key.)
+workers_dev = false
+
 # The site root is the repo root. .assetsignore keeps server code, docs, tests
 # and tooling out of the upload entirely, so only the actual site is published.
 [assets]
@@ -43,11 +49,6 @@ database_id = "f1aaa67a-4c77-4060-85ec-a1d6a96f5d96"
 
 # The real domain. gurmen.com.ar is a Cloudflare zone on this account, so
 # deploying creates the DNS record for the subdomain automatically.
-#
-# workers.dev stays enabled for now as a fallback. Once the domain is verified
-# it should be turned off (workers_dev = false): the OpenID return_to is built
-# from whichever origin the request arrived on, and one canonical origin keeps
-# that unambiguous.
 [[routes]]
 pattern = "dota2.gurmen.com.ar"
 custom_domain = true
