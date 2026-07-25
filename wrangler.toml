@@ -29,14 +29,15 @@ enabled = true
 [build]
 command = "npm test"
 
-# Uncomment once the database exists:
-#   wrangler d1 create pickthelock
-#   wrangler d1 execute pickthelock --remote --file=leaderboard/schema.sql
 # database_id is an identifier, not a credential, so it belongs in the repo.
-# [[d1_databases]]
-# binding = "DB"
-# database_name = "pickthelock"
-# database_id = "<paste from `wrangler d1 create`>"
+# Apply the schema with `npm run db:init`.
+#
+# The binding is DB, not the database name Cloudflare's snippet suggests —
+# leaderboard/handlers.js reads env.DB.
+[[d1_databases]]
+binding = "DB"
+database_name = "pickthelock"
+database_id = "811b3ca7-b723-403d-9dfb-e12b04e2ae87"
 
 # Uncomment to serve the Worker from the real domain. Until then it is
 # reachable at <name>.<subdomain>.workers.dev.
