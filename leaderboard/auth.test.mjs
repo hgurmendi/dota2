@@ -265,13 +265,13 @@ section("routes");
     // open-redirect guard on ?next=
     const r = await handle(get("/api/auth/steam?next=https://evil.test/steal"), env);
     const rt = new URL(new URL(r.headers.get("location")).searchParams.get("openid.return_to"));
-    check("next= cannot point off-origin", rt.searchParams.get("next") === "/dota2/pickthelock/");
+    check("next= cannot point off-origin", rt.searchParams.get("next") === "/");
     const r2 = await handle(get("/api/auth/steam?next=//evil.test/steal"), env);
     const rt2 = new URL(new URL(r2.headers.get("location")).searchParams.get("openid.return_to"));
-    check("next= rejects protocol-relative", rt2.searchParams.get("next") === "/dota2/pickthelock/");
-    const r3 = await handle(get("/api/auth/steam?next=/dota2/pickthelock/%23autostart"), env);
+    check("next= rejects protocol-relative", rt2.searchParams.get("next") === "/");
+    const r3 = await handle(get("/api/auth/steam?next=/pickthelock/%23autostart"), env);
     const rt3 = new URL(new URL(r3.headers.get("location")).searchParams.get("openid.return_to"));
-    check("next= keeps a same-origin path", rt3.searchParams.get("next") === "/dota2/pickthelock/#autostart");
+    check("next= keeps a same-origin path", rt3.searchParams.get("next") === "/pickthelock/#autostart");
   }
 }
 
@@ -320,8 +320,8 @@ section("end to end: sign in, then use the session");
 
   const cookies = done.headers.getSetCookie?.() ?? [done.headers.get("set-cookie")];
   const sessionCookie = cookies.find((c) => c && c.startsWith(SESSION_COOKIE + "="));
-  check("callback redirects back into the game",
-    done.status === 302 && done.headers.get("location") === "/dota2/pickthelock/",
+  check("callback redirects home",
+    done.status === 302 && done.headers.get("location") === "/",
     `${done.status} -> ${done.headers.get("location")}`);
   check("callback issues a session cookie", !!sessionCookie);
   check("and clears the state cookie",

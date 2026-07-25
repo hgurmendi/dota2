@@ -1,12 +1,13 @@
-# Cloudflare Worker: serves the static site and the leaderboard API from one
-# deployment. See issue #2 for the plan and DEPLOY.md for the setup checklist.
+# Cloudflare Worker: serves the whole dota2 site — the root page, every
+# minigame, and the leaderboard API — from one deployment. DEPLOY.md is the
+# setup checklist.
 #
 # Everything that can live in version control does. The only things that can't
 # are the two secrets — Cloudflare stores those encrypted and never returns
 # them, so they are set once with `wrangler secret put` (see DEPLOY.md) and
 # must never appear in this file, which is committed.
 
-name = "pickthelock"
+name = "dota2"
 main = "worker/index.js"
 compatibility_date = "2026-07-01"
 
@@ -29,24 +30,27 @@ enabled = true
 [build]
 command = "npm test"
 
-# database_id is an identifier, not a credential, so it belongs in the repo.
-# Apply the schema with `npm run db:init`.
+# One database for the whole site: sign-in plus every minigame's runs.
+# Uncomment once it exists — a placeholder id here would fail validation:
+#   wrangler d1 create dota2      # paste the id below
+#   npm run db:init               # applies leaderboard/schema.sql
 #
+# database_id is an identifier, not a credential, so it belongs in the repo.
 # The binding is DB, not the database name Cloudflare's snippet suggests —
 # leaderboard/handlers.js reads env.DB.
-[[d1_databases]]
-binding = "DB"
-database_name = "pickthelock"
-database_id = "811b3ca7-b723-403d-9dfb-e12b04e2ae87"
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "dota2"
+# database_id = "<paste from `wrangler d1 create dota2`>"
 
 # Uncomment to serve the Worker from the real domain. Until then it is
 # reachable at <name>.<subdomain>.workers.dev.
 # [[routes]]
-# pattern = "example.com"
+# pattern = "dota2.gurmen.com.ar"
 # custom_domain = true
 
 # [vars] holds non-secret configuration only.
 # SITE_ORIGIN is needed when the public origin differs from the request origin
 # (behind a proxy, or to pin the OpenID return_to to the canonical domain).
 # [vars]
-# SITE_ORIGIN = "https://example.com"
+# SITE_ORIGIN = "https://dota2.gurmen.com.ar"

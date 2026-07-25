@@ -38,9 +38,9 @@ belongs to (exact from vdata / interpreted / tuned by feel).
 ## Working on the game
 
 - ES modules don't load over `file://`: serve the repo root and open
-  `/dota2/pickthelock/`. `npm run dev` (from the repo root) serves the site
-  and the leaderboard API together; `python3 -m http.server` also works if
-  only the game matters. See `../../DEPLOY.md`.
+  `/pickthelock/`. `npm run dev` (from the repo root) serves the site and the
+  leaderboard API together; `python3 -m http.server` also works if only the
+  game matters. See `../DEPLOY.md`.
 - `#autostart` hash skips the menu (used for automated screenshots);
   `#calibrate` turns clicks into background-image coordinate readouts
   for positioning scene props.

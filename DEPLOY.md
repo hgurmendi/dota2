@@ -1,7 +1,8 @@
 # Deploying
 
-The site runs as a single Cloudflare Worker: `worker/index.js` serves the
-leaderboard API under `/api/*` and hands everything else to the static asset
+The site runs as a single Cloudflare Worker at `dota2.gurmen.com.ar`:
+`worker/index.js` serves the leaderboard API under `/api/*` and hands
+everything else — the root page and every minigame — to the static asset
 server. Configuration lives in `wrangler.toml` and is version-controlled.
 
 The two secrets are the only things that cannot be: Cloudflare stores them
@@ -14,7 +15,7 @@ encrypted and never returns them, so they are set once with
 |---|---|
 | `wrangler.toml` | Worker name, entry point, assets, bindings, test gate |
 | `.assetsignore` | what is **not** uploaded — server code, docs, tests, tooling |
-| `leaderboard/schema.sql` | D1 schema |
+| `leaderboard/schema.sql` | D1 schema (players + per-game runs) |
 | `.dev.vars.example` | template for local secrets; copy to `.dev.vars` |
 | `.github/workflows/test.yml` | runs both suites on push and PR |
 
@@ -31,7 +32,7 @@ npm run dev               # plain node, no Cloudflare account needed
 npm run dev:wrangler      # wrangler dev — closer to production, emulates D1
 ```
 
-`npm run dev` serves <http://localhost:8787/dota2/pickthelock/>. Steam accepts
+`npm run dev` serves <http://localhost:8787/>. Steam accepts
 an `http://localhost` `return_to`, so a real end-to-end login can be tested
 locally once `STEAM_API_KEY` is set:
 
@@ -47,7 +48,7 @@ Each step is one command; nothing here is reversible-by-accident.
 
 2. **Create the database.**
    ```bash
-   npx wrangler d1 create pickthelock
+   npx wrangler d1 create dota2
    ```
    Paste the printed `database_id` into the `[[d1_databases]]` block in
    `wrangler.toml` and uncomment it. The id is an identifier, not a
@@ -65,7 +66,7 @@ Each step is one command; nothing here is reversible-by-accident.
 
 5. **Deploy.** `npm run deploy`
    The `[build]` command runs both test suites first; a failure stops the
-   deploy. The Worker lands on `pickthelock.<subdomain>.workers.dev` — check
+   deploy. The Worker lands on `dota2.<subdomain>.workers.dev` — check
    the game loads and `/api/status` reports `auth: true`.
 
 6. **Attach the domain.** Uncomment the `[[routes]]` block in `wrangler.toml`
@@ -74,10 +75,6 @@ Each step is one command; nothing here is reversible-by-accident.
 7. **Connect Git** (optional, restores push-to-deploy): Workers dashboard →
    the Worker → Settings → Builds → connect the GitHub repo. Cloudflare then
    runs `npm test` via the `[build]` command on each push.
-
-8. **Retire Pages.** Once the Worker serves the domain, delete the Pages
-   project and `deploy-clean.sh`, which exists only to keep Pages deploying
-   during the switch.
 
 ## Notes
 

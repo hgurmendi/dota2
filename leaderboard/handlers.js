@@ -27,7 +27,10 @@ import {
 } from "./session.js";
 import * as steam from "./steam.js";
 
-const GAME_PATH = "/dota2/pickthelock/";
+// Where a login lands when nothing better is asked for. The root page carries
+// the sign-in UI and the game index; every game sits under it on the same
+// origin, which is what lets one session cover all of them.
+const HOME_PATH = "/";
 
 const json = (data, init = {}) =>
   new Response(JSON.stringify(data), {
@@ -54,8 +57,8 @@ function siteOrigin(request, env) {
  */
 function safeNext(url) {
   const next = url.searchParams.get("next");
-  if (typeof next !== "string") return GAME_PATH;
-  if (!next.startsWith("/") || next.startsWith("//")) return GAME_PATH;
+  if (typeof next !== "string") return HOME_PATH;
+  if (!next.startsWith("/") || next.startsWith("//")) return HOME_PATH;
   return next;
 }
 

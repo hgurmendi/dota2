@@ -1,15 +1,15 @@
 {
-  "name": "homepage",
+  "name": "dota2",
   "private": true,
   "type": "module",
-  "description": "Personal homepage. dota2/pickthelock is a browser recreation of Dota 2's Dark Carnival lockpicking minigame; leaderboard/ is its API.",
+  "description": "Browser recreations of Dota 2 minigames, with Steam sign-in and replay-verified leaderboards.",
   "scripts": {
-    "test": "node dota2/pickthelock/engine.test.mjs && node leaderboard/auth.test.mjs",
+    "test": "node pickthelock/engine.test.mjs && node leaderboard/auth.test.mjs",
     "dev": "node leaderboard/dev-server.mjs",
     "dev:wrangler": "wrangler dev",
     "deploy": "wrangler deploy",
-    "db:init": "wrangler d1 execute pickthelock --remote --file=leaderboard/schema.sql",
-    "db:init:local": "wrangler d1 execute pickthelock --local --file=leaderboard/schema.sql"
+    "db:init": "wrangler d1 execute dota2 --remote --file=leaderboard/schema.sql",
+    "db:init:local": "wrangler d1 execute dota2 --local --file=leaderboard/schema.sql"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"

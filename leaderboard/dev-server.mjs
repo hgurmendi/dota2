@@ -82,7 +82,7 @@ createServer(async (req, res) => {
 
   res.end(response.body ? Buffer.from(await response.arrayBuffer()) : undefined);
 }).listen(PORT, () => {
-  console.log(`pickthelock dev server  http://localhost:${PORT}/dota2/pickthelock/`);
+  console.log(`dota2 dev server  http://localhost:${PORT}/`);
   console.log(`  api      http://localhost:${PORT}/api/status`);
   console.log(`  steam    ${env.STEAM_API_KEY ? "api key set" : "no STEAM_API_KEY — login works, no persona/avatar"}`);
   if (env.SESSION_SECRET === "dev-only-insecure-secret") {

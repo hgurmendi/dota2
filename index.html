@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dota 2 Minigames</title>
+<link rel="icon" href="pickthelock/assets/favicon.ico">
+<meta name="description" content="Browser recreations of Dota 2's minigames.">
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: rgba(18, 15, 13, 0.72);
+    --line: rgba(201, 169, 79, 0.28);
+    --gold: #c9a94f;
+    --gold-bright: #ffe98a;
+    --text: #cfc4a6;
+    --muted: rgba(200, 190, 170, 0.55);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background: radial-gradient(ellipse at 50% -10%, #1a1408 0%, var(--bg) 55%) fixed;
+    color: var(--text);
+    font-family: Georgia, "Times New Roman", serif;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+  a { color: inherit; }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1.25rem clamp(1rem, 4vw, 3rem);
+    border-bottom: 1px solid var(--line);
+    flex-wrap: wrap;
+  }
+  .wordmark {
+    font-size: clamp(1rem, 2.4vw, 1.3rem);
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--gold-bright);
+    text-decoration: none;
+  }
+  .wordmark span { color: var(--muted); font-weight: 400; }
+
+  /* auth corner: fixed height so swapping states doesn't shift the header */
+  #auth { display: flex; align-items: center; gap: 0.7rem; min-height: 40px; }
+  #auth .muted { color: var(--muted); font-size: 0.85rem; }
+  .avatar {
+    width: 32px; height: 32px; border-radius: 50%;
+    border: 1px solid var(--line); display: block;
+  }
+  .persona { font-size: 0.95rem; color: var(--text); }
+  .btn {
+    font: inherit;
+    font-size: 0.9rem;
+    padding: 0.5rem 0.95rem;
+    border-radius: 999px;
+    border: 1px solid var(--gold);
+    background: transparent;
+    color: var(--gold-bright);
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-block;
+    transition: background 120ms ease, color 120ms ease;
+  }
+  .btn:hover { background: rgba(201, 169, 79, 0.16); }
+  .btn-quiet { border-color: var(--line); color: var(--muted); }
+
+  main { flex: 1; padding: clamp(2rem, 6vw, 4rem) clamp(1rem, 4vw, 3rem); }
+  .lede { max-width: 46ch; margin: 0 0 2.5rem; line-height: 1.6; color: var(--muted); }
+
+  .games { display: grid; gap: 1.25rem; grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr)); max-width: 1100px; }
+  .game {
+    display: block;
+    text-decoration: none;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--panel);
+    overflow: hidden;
+    transition: border-color 140ms ease, transform 140ms ease;
+  }
+  .game:hover { border-color: var(--gold); transform: translateY(-2px); }
+  .game .shot { aspect-ratio: 16 / 10; background: #06080d center/cover no-repeat; display: block; }
+  .game .body { padding: 1rem 1.1rem 1.2rem; }
+  .game h2 { margin: 0 0 0.35rem; font-size: 1.05rem; color: var(--gold-bright); font-weight: 700; }
+  .game p { margin: 0; font-size: 0.88rem; line-height: 1.5; color: var(--muted); }
+
+  footer {
+    padding: 1.5rem clamp(1rem, 4vw, 3rem);
+    border-top: 1px solid var(--line);
+    font-size: 0.78rem;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+  footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <a class="wordmark" href="/">Dota&nbsp;2 <span>minigames</span></a>
+  <!-- Filled in by JS. Starts empty rather than showing a signed-out state,
+       so a signed-in visitor never sees their status flip after load. -->
+  <div id="auth" aria-live="polite"></div>
+</header>
+
+<main>
+  <p class="lede">
+    Browser recreations of the minigames from Dota&nbsp;2, rebuilt from the
+    game's own data files. Signing in is optional — everything is playable
+    without it.
+  </p>
+
+  <div class="games">
+    <a class="game" href="/pickthelock/">
+      <span class="shot" style="background-image: url('pickthelock/assets/lockpicking_background.webp'); background-position: center 22%;"></span>
+      <span class="body">
+        <h2>Pick the Lock</h2>
+        <p>Catch the sweeping needle on each bar before the clock runs out.
+           From the Dark Carnival event.</p>
+      </span>
+    </a>
+  </div>
+</main>
+
+<footer>
+  Fan recreations. Dota&nbsp;2 art, audio and fonts © Valve Corporation; not
+  affiliated with or endorsed by Valve.
+  <a href="https://github.com/hgurmendi/dota2">Source on GitHub</a>.
+</footer>
+
+<script type="module">
+import { getSession, signInUrl, signOut } from "/shared/auth.js";
+
+const el = document.getElementById("auth");
+
+function render(session) {
+  el.replaceChildren();
+
+  if (!session) {
+    const a = document.createElement("a");
+    a.className = "btn";
+    a.href = signInUrl("/");
+    a.textContent = "Sign in through Steam";
+    el.append(a);
+    return;
+  }
+
+  if (session.avatar) {
+    const img = document.createElement("img");
+    img.className = "avatar";
+    img.src = session.avatar;
+    img.alt = "";
+    el.append(img);
+  }
+
+  const name = document.createElement("span");
+  name.className = "persona";
+  // Persona names come from Steam and are attacker-controlled; textContent
+  // keeps them text rather than markup.
+  name.textContent = session.persona || session.steamid;
+  el.append(name);
+
+  const out = document.createElement("button");
+  out.className = "btn btn-quiet";
+  out.textContent = "Sign out";
+  out.addEventListener("click", async () => {
+    out.disabled = true;
+    await signOut();
+    render(null);
+  });
+  el.append(out);
+}
+
+render(await getSession());
+</script>
+
+</body>
+</html>
