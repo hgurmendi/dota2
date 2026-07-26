@@ -4,7 +4,7 @@
  * parameters, and we ask Steam whether it really signed them.
  *
  * The whole security of the flow rests on a handful of checks that are easy
- * to omit, so they are spelled out and individually tested in steam.test.mjs.
+ * to omit, so they are spelled out and individually tested in auth.test.ts.
  * The load-bearing one is that verification is always POSTed to the hardcoded
  * endpoint below. A response carries its own `openid.op_endpoint`, and an
  * implementation that verifies against *that* can be handed a URL the
@@ -41,6 +41,13 @@ const IDENTIFIER_SELECT = NS + "/identifier_select";
 const ID_PREFIX = "https://steamcommunity.com/openid/id/";
 const STEAM_API = "https://api.steampowered.com";
 const DOTA2_APPID = 570;
+
+// The fields below are checked before a login is accepted, so the signature has
+// to actually cover them. `openid.signed` lists what it covers, and the sender
+// chooses that list — so a check on a field absent from it is a check on a
+// value the signature says nothing about (OpenID 2.0 §11.4). Named without the
+// "openid." prefix, which is how they appear in the list.
+const REQUIRED_SIGNED = ["op_endpoint", "claimed_id", "identity", "return_to"];
 
 /** Where to send the browser to start a login. */
 export function loginUrl(returnTo: string, realm: string): string {
@@ -82,11 +89,21 @@ export async function verifyCallback(params: URLSearchParams, expectedReturnTo: 
   // POST below goes to STEAM_OPENID regardless of what this field says.
   if (params.get("openid.op_endpoint") !== STEAM_OPENID) return { ok: false, reason: "op_endpoint" };
 
+  if (!params.get("openid.sig") || !params.get("openid.signed")) return { ok: false, reason: "unsigned" };
+
+  // Establish what the signature covers before reading anything it protects.
+  // Steam always signs all four, so this rejects nothing Steam sends — it is
+  // here so that every check below is a check on signed data by construction,
+  // rather than by the fact that the identity provider happens to be generous.
+  const signed = new Set((params.get("openid.signed") ?? "").split(",").map((f) => f.trim()));
+  for (const field of REQUIRED_SIGNED) {
+    if (!signed.has(field)) return { ok: false, reason: "signed_fields" };
+  }
+
   const steamid = steamIdFrom(params.get("openid.claimed_id"));
   if (!steamid) return { ok: false, reason: "claimed_id" };
   if (steamIdFrom(params.get("openid.identity")) !== steamid) return { ok: false, reason: "identity" };
   if (params.get("openid.return_to") !== expectedReturnTo) return { ok: false, reason: "return_to" };
-  if (!params.get("openid.sig") || !params.get("openid.signed")) return { ok: false, reason: "unsigned" };
 
   const body = new URLSearchParams(params);
   body.set("openid.mode", "check_authentication");

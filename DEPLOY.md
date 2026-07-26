@@ -1,7 +1,7 @@
 # Deploying
 
 The site runs as a single Cloudflare Worker at `dota2.gurmen.com.ar`:
-`worker/index.js` serves the leaderboard API under `/api/*` and hands
+`worker/index.ts` serves the leaderboard API under `/api/*` and hands
 everything else — the root page and every minigame — to the static asset
 server. Configuration lives in `wrangler.toml` and is version-controlled.
 
@@ -19,11 +19,13 @@ encrypted and never returns them, so they are set once with
 | `.assetsignore` | what is **not** uploaded — server code, docs, tests, tooling |
 | `leaderboard/schema.sql` | D1 schema (players + per-game runs) |
 | `.dev.vars.example` | template for local secrets; copy to `.dev.vars` |
-| `.github/workflows/test.yml` | runs both suites on push and PR |
+| `.github/workflows/test.yml` | builds, type-checks and runs every suite on push and PR |
 
 `.assetsignore` is load-bearing, not cosmetic: without it Wrangler tries to
 upload `node_modules/` and fails on the 25 MiB asset limit. It is what keeps
-`leaderboard/*.js` off the public site.
+`leaderboard/*.ts` off the public site — and `leaderboard/dev-server.ts` reads
+it directly, so the local server blocks the same set instead of a copy of the
+list that drifts.
 
 ## Local development
 
@@ -48,9 +50,11 @@ locally once `STEAM_API_KEY` is set:
 SESSION_SECRET=dev STEAM_API_KEY=<key> npm run dev
 ```
 
-## First deploy
+## Standing it up from scratch
 
-Each step is one command; nothing here is reversible-by-accident.
+The runbook for a fresh Cloudflare account. `wrangler.toml` already carries the
+real values for the account this deploys to, so nothing here is commented out
+waiting to be enabled — on an existing checkout only steps 1, 3 and 4 apply.
 
 1. **Authenticate.** `npx wrangler login`
 
@@ -58,8 +62,8 @@ Each step is one command; nothing here is reversible-by-accident.
    ```bash
    npx wrangler d1 create dota2
    ```
-   Paste the printed `database_id` into the `[[d1_databases]]` block in
-   `wrangler.toml` and uncomment it. The id is an identifier, not a
+   Paste the printed `database_id` over the one already in the
+   `[[d1_databases]]` block in `wrangler.toml`. The id is an identifier, not a
    credential — it belongs in the repo.
 
 3. **Apply the schema.** `npm run db:init`
@@ -72,13 +76,16 @@ Each step is one command; nothing here is reversible-by-accident.
    Rotating `SESSION_SECRET` signs every user out — that is the intended
    revocation mechanism, since sessions are stateless signed cookies.
 
-5. **Deploy.** `npm run deploy`
-   The `[build]` command runs both test suites first; a failure stops the
-   deploy. The Worker lands on `dota2.<subdomain>.workers.dev` — check
-   the game loads and `/api/status` reports `auth: true`.
+5. **Point `[[routes]]` at a hostname you hold.** The block names
+   `dota2.gurmen.com.ar`. `custom_domain = true` has Cloudflare create the DNS
+   record on deploy, so the zone must belong to the account. Leave
+   `workers_dev = false` alone — the reason is in `wrangler.toml`, and it is a
+   security property, not a preference.
 
-6. **Attach the domain.** Uncomment the `[[routes]]` block in `wrangler.toml`
-   with the real hostname and deploy again.
+6. **Deploy.** `npm run deploy`
+   The `[build]` command runs `npm test` first — build, type-check, all three
+   suites — and a failure stops the deploy. The Worker lands on the hostname
+   from step 5; check the game loads and `/api/status` reports `auth: true`.
 
 7. **Connect Git so the Worker tracks `main`.** Workers dashboard → the
    Worker → Settings → Builds → connect `hgurmendi/dota2`, branch `main`.
@@ -120,7 +127,7 @@ build environment.
 - Static asset requests are free and unlimited; only `/api/*` invokes the
   Worker and counts against the quota (100k/day free).
 - The free tier allows 10 ms CPU per invocation. Worst-case run verification
-  is ~1.1 ms, which is why the simulation runs at 120 Hz — see `engine.js`.
+  is ~1.1 ms, which is why the simulation runs at 120 Hz — see `engine.ts`.
 - Without `SESSION_SECRET` the auth endpoints return 503 and `/api/status`
   reports `auth: false`, rather than half-working. Deploying before step 4 is
   safe.

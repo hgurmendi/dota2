@@ -5,8 +5,11 @@ import * as THREE from "three";
 // Canvas 2D version (no sRGB/linear conversions to keep art colors identical).
 THREE.ColorManagement.enabled = false;
 
-// The game itself lives in engine.js: a fixed-timestep, seeded, side-effect-free
-// simulation. This file drives it and draws it, and owns everything the sim must
+// The game itself lives in engine.ts: a fixed-timestep, seeded, side-effect-free
+// simulation. It is imported below as "./engine.js" — the built artifact, kept
+// external so the browser and the Worker load one compilation rather than two
+// (build.mjs explains why that matters).
+// This file drives it and draws it, and owns everything the sim must
 // not know about — sound, particles, screens, input devices. It must never make a
 // gameplay decision of its own: a run has to stay reproducible from its seed and
 // its recorded inputs alone, because that is what lets a leaderboard verify it.
@@ -18,7 +21,7 @@ const ui = (document.getElementById("ui") as HTMLCanvasElement).getContext("2d")
 
 // ---------- Simulation ----------
 // Every gameplay parameter, and the reasoning behind each one, lives in
-// engine.js and DESIGN.md. Nothing tunable belongs in this file.
+// engine.ts and DESIGN.md. Nothing tunable belongs in this file.
 //
 // These are named imports rather than a destructure of the ENGINE namespace on
 // purpose: a name that engine.js doesn't export fails at load with an error

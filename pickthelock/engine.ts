@@ -101,6 +101,21 @@ const NEEDLE_GRACE     = 2.0 * DEG;         // hit tolerance beyond wedge edges
 export const MAX_RUN_TIME = 180;
 export const MAX_TICKS = MAX_RUN_TIME * TICK;
 
+// Bounds on a trace, applied while decoding rather than after.
+//
+// MAX_TICKS caps how long a run can be *simulated* for, which bounds verifier
+// CPU. It does nothing about memory: a submitted trace is a string an attacker
+// wrote, and decoding it allocates one array entry per input before the
+// simulation ever runs and rejects it. So the decoder stops early instead.
+//
+// MAX_INPUTS is one input per tick averaged over the whole run cap — 120
+// presses a second, sustained for three minutes. No hand does that, and the
+// host cannot emit it either: it queues inputs per frame, and a frame is
+// several ticks. MAX_TRACE_LENGTH follows from it, since the tightest encoding
+// of an input is two characters. A real run is a few hundred bytes (DESIGN.md).
+export const MAX_INPUTS = MAX_TICKS;
+export const MAX_TRACE_LENGTH = MAX_INPUTS * 4;
+
 const TAU = Math.PI * 2;
 
 // ---------- Types ----------
@@ -433,7 +448,9 @@ export function encodeInputs(inputs: InputEvent[]): string {
 
 export function decodeInputs(str: string): InputEvent[] {
   const out: InputEvent[] = [];
+  if (typeof str !== "string") throw new Error("bad input trace");
   if (!str) return out;
+  if (str.length > MAX_TRACE_LENGTH) throw new Error("input trace too long");
   let prev = 0;
   const re = /([0-9a-z]+)([PBR])/g;
   let m, consumed = 0;
@@ -441,7 +458,12 @@ export function decodeInputs(str: string): InputEvent[] {
     if (m.index !== consumed) throw new Error("bad input trace");
     consumed = re.lastIndex;
     const t = prev + parseInt(m[1], 36);
-    if (!(t >= prev)) throw new Error("bad input trace");
+    // A tick at or past the cap can never be reached, so reject it here rather
+    // than simulating the full run to discover the trace was unusable. It also
+    // keeps an absurd base36 delta from decoding to Infinity and sailing past
+    // the ordering check below.
+    if (!(t >= prev) || t >= MAX_TICKS) throw new Error("bad input trace");
+    if (out.length >= MAX_INPUTS) throw new Error("too many inputs");
     out.push({ t, a: m[2] as InputCode });
     prev = t;
   }
@@ -456,11 +478,19 @@ export function decodeInputs(str: string): InputEvent[] {
  * function a leaderboard server calls: the client's claimed score is never
  * read, only the seed and the inputs, and the score below is the truth.
  *
+ * Note what that is and isn't. It proves the score is reachable from the seed,
+ * not that a human reached it — a solver against a known seed produces a trace
+ * this function is perfectly happy with. Ranking needs more than this call;
+ * DESIGN.md, "What replay proves, and what it does not", says what.
+ *
  * Throws on a malformed trace. Never trusts the caller for termination — the
  * MAX_TICKS bound holds even if the tunables are later changed badly.
  */
 export function simulate(seed: number, inputs: string | InputEvent[]): RunSummary {
   const list = typeof inputs === "string" ? decodeInputs(inputs) : inputs;
+  // decodeInputs already bounds the string form; this covers the array form,
+  // which the host and the tests use.
+  if (list.length > MAX_INPUTS) throw new Error("too many inputs");
   const s = createRun(seed);
   let i = 0;
 

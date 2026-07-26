@@ -1,5 +1,5 @@
 // The Worker: one deployment serving both the static game and the leaderboard
-// API. All the logic lives in ../leaderboard/handlers.js as a plain
+// API. All the logic lives in ../leaderboard/handlers.ts as a plain
 // (Request, env) -> Response, so nothing here is Cloudflare-specific beyond
 // the ASSETS binding.
 //

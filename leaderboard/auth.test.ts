@@ -1,5 +1,5 @@
 /**
- * Tests for session signing and the Steam OpenID flow.  `node auth.test.mjs`
+ * Tests for session signing and the Steam OpenID flow.  `npm test`
  *
  * Everything here runs offline: Steam is a stub, so the checks that matter
  * (a forged verification endpoint, a replayed return_to, a tampered cookie)
@@ -178,6 +178,24 @@ section("callback verification");
   }
 
   {
+    // Only the fields listed in openid.signed are covered by the signature, and
+    // the sender writes that list. Checking claimed_id while it sits outside
+    // the list is checking a value the signature says nothing about.
+    for (const field of ["op_endpoint", "claimed_id", "identity", "return_to"]) {
+      const signed = "signed,op_endpoint,claimed_id,identity,return_to,response_nonce,assoc_handle"
+        .split(",").filter((f) => f !== field).join(",");
+      const { fetchImpl, calls } = steamStub();
+      const r = await steam.verifyCallback(callbackParams({ "openid.signed": signed }, RT), RT, fetchImpl);
+      check(`rejects a response not signing ${field}`, !r.ok && r.reason === "signed_fields",
+        JSON.stringify(r));
+      check(`  and never asks Steam about it`, calls.length === 0);
+    }
+    const { fetchImpl } = steamStub();
+    const r = await steam.verifyCallback(callbackParams({ "openid.signed": "" }, RT), RT, fetchImpl);
+    check("rejects an empty signed list", !r.ok && r.reason === "unsigned");
+  }
+
+  {
     // "is_valid:false" must not be read as containing "is_valid:true"
     const fetchImpl = async () => new Response("ns:x\nis_valid:false\nnote:is_valid:true is not here\n");
     const r = await steam.verifyCallback(callbackParams({}, RT), RT, fetchImpl);
@@ -273,7 +291,43 @@ section("routes");
     const r3 = await handle(get("/api/auth/steam?next=/pickthelock/%23autostart"), env);
     const rt3 = new URL(new URL(r3.headers.get("location")!).searchParams.get("openid.return_to")!);
     check("next= keeps a same-origin path", rt3.searchParams.get("next") === "/pickthelock/#autostart");
+
+    // Spellings that still leave the site. A backslash is just another slash to
+    // the URL parser, so "/\evil.test" is an authority — it walked straight
+    // past a guard that only looked for a doubled "/".
+    for (const raw of ["/\\evil.test/steal", "/\\/evil.test", "/\t/\\evil.test", "\\\\evil.test"]) {
+      const r = await handle(get("/api/auth/steam?next=" + encodeURIComponent(raw)), env);
+      const rt = new URL(new URL(r.headers.get("location")!).searchParams.get("openid.return_to")!);
+      const landed = new URL(rt.searchParams.get("next")!, ORIGIN);
+      check(`next=${JSON.stringify(raw)} stays on-origin`,
+        landed.origin === ORIGIN, `resolves to ${landed.href}`);
+    }
   }
+}
+
+// ---------- degraded and hostile database ----------
+section("the database failing does not break identity");
+{
+  const brokenDB = {
+    prepare() {
+      return { bind() { return {
+        async run() { throw new Error("D1 unreachable"); },
+        async first() { throw new Error("D1 unreachable"); },
+      }; } };
+    },
+  };
+  const env = { SESSION_SECRET: SECRET, SITE_ORIGIN: ORIGIN, DB: brokenDB } as unknown as Env;
+  const token = await mintSession(SECRET, STEAMID);
+
+  const me = await handle(new Request(ORIGIN + "/api/me",
+    { headers: { cookie: `${SESSION_COOKIE}=${token}` } }), env);
+  const body = await me.json() as any;
+  check("me still identifies the player without a readable row",
+    me.status === 200 && body.steamid === STEAMID && body.persona === null,
+    `${me.status} ${JSON.stringify(body)}`);
+
+  const status = await handle(new Request(ORIGIN + "/api/status"), env);
+  check("status is unaffected", status.status === 200);
 }
 
 // ---------- the whole flow ----------
@@ -341,6 +395,27 @@ section("end to end: sign in, then use the session");
   rows.get(STEAMID)!.banned = 1;
   const banned = await handle(new Request(ORIGIN + "/api/me", { headers: { cookie: `${SESSION_COOKIE}=${token}` } }), env);
   check("a banned player is refused despite a good session", banned.status === 403);
+  check("and the refusal drops the cookie",
+    (banned.headers.getSetCookie?.() ?? []).some((c) => c.startsWith(SESSION_COOKIE + "=") && c.includes("Max-Age=0")));
+
+  // 5. ...and cannot simply sign in again for a fresh one, which is the first
+  // thing a banned player tries.
+  const restart = await handle(new Request(ORIGIN + "/api/auth/steam"), env);
+  const state2 = (restart.headers.get("set-cookie") || "").split("=")[1].split(";")[0];
+  const returnTo2 = new URL(new URL(restart.headers.get("location")!).searchParams.get("openid.return_to")!);
+  const realFetch2 = globalThis.fetch;
+  globalThis.fetch = steamStub().fetchImpl;
+  let retry: Response;
+  try {
+    const cb = new URL(returnTo2);
+    for (const [k, v] of callbackParams({}, returnTo2.toString())) cb.searchParams.set(k, v);
+    retry = await handle(new Request(cb, { headers: { cookie: `${STATE_COOKIE}=${state2}` } }), env);
+  } finally {
+    globalThis.fetch = realFetch2;
+  }
+  const retryCookies = retry.headers.getSetCookie?.() ?? [];
+  check("a banned player cannot log back in", retry.status === 403, String(retry.status));
+  check("and is issued no session", !retryCookies.some((c) => c.startsWith(SESSION_COOKIE + "=")));
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -1,15 +1,16 @@
 /**
- * Determinism tests for the simulation core.  `node engine.test.mjs`
+ * Determinism tests for the simulation core.  `npm test`
  *
  * These guard the property the leaderboard depends on: a run is fully
  * described by its seed plus its input trace, and replaying it anywhere
- * reproduces the score exactly. Run this after touching engine.js.
+ * reproduces the score exactly. Run this after touching engine.ts.
  */
 import type { InputCode, InputEvent, RunState, RunSummary } from "./engine.ts";
 import {
   createRun, step, pick, setBoost, drain, simulate, summary, sameResult,
   encodeInputs, decodeInputs, wedgeUnderNeedle,
-  TICK, MAX_RUN_TIME, MAX_TICKS, HIT_SCORE, PICK, BOOST_ON, BOOST_OFF,
+  TICK, MAX_RUN_TIME, MAX_TICKS, MAX_INPUTS, MAX_TRACE_LENGTH,
+  HIT_SCORE, PICK, BOOST_ON, BOOST_OFF,
 } from "./engine.ts";
 
 let passed = 0, failed = 0;
@@ -111,6 +112,44 @@ section("input trace encoding");
     try { decodeInputs(bad); } catch (e) { threw = true; }
     check(`rejects ${JSON.stringify(bad)}`, threw);
   }
+}
+
+section("a hostile trace is bounded before it is allocated");
+{
+  // A submitted trace is a string an attacker wrote. Decoding must refuse it on
+  // size rather than building the array first and letting the simulation find
+  // out afterwards.
+  const tooLong = "1P".repeat(MAX_TRACE_LENGTH);
+  let threw = false, msg = "";
+  try { decodeInputs(tooLong); } catch (e) { threw = true; msg = (e as Error).message; }
+  check(`rejects a ${tooLong.length}-char trace without decoding it`,
+    threw && msg === "input trace too long", msg);
+
+  // Under the length cap but over the count cap: every input is the shortest
+  // encoding there is, so this is the densest a trace can legally get.
+  let over = false;
+  try { decodeInputs("0P".repeat(MAX_INPUTS + 1)); } catch (e) { over = (e as Error).message === "too many inputs"; }
+  check("rejects more inputs than there are ticks to hold them", over);
+
+  // A base36 delta long enough to parse as Infinity used to sail past the
+  // ordering check and cost a full MAX_TICKS simulation to reject.
+  let huge = false;
+  try { decodeInputs("z".repeat(400) + "P"); } catch (e) { huge = true; }
+  check("rejects a tick delta past the run cap", huge);
+
+  let arr = false;
+  try {
+    simulate(1, Array.from({ length: MAX_INPUTS + 1 }, (_, i) => ({ t: 0, a: PICK as InputCode })));
+  } catch (e) { arr = (e as Error).message === "too many inputs"; }
+  check("bounds the array form too", arr);
+
+  // and none of that may cost an honest trace: the longest real run is nowhere near
+  const { inputs } = play(31337, human(31337));
+  const enc = encodeInputs(inputs);
+  check(`a real run sits far under the caps (${enc.length} of ${MAX_TRACE_LENGTH} bytes, ` +
+        `${inputs.length} of ${MAX_INPUTS} inputs)`,
+    enc.length < MAX_TRACE_LENGTH / 50 && inputs.length < MAX_INPUTS / 20 &&
+    decodeInputs(enc).length === inputs.length);
 }
 
 section("malformed traces are rejected, not simulated");

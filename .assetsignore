@@ -5,6 +5,10 @@
 # This replaces the old Pages approach of deleting files during the build.
 # Nothing here is destructive, and it is version-controlled alongside the code
 # it protects.
+#
+# leaderboard/dev-server.ts parses this file directly rather than restating it,
+# so the local server blocks exactly what the deploy does. Keep the syntax to
+# what is used below — `dir/`, plain names, and `*` — or teach it the rest.
 
 # server code — runs in the Worker, is not part of the site
 worker/
@@ -17,7 +21,7 @@ package-lock.json
 node_modules/
 .wrangler/
 .assetsignore
-deploy-clean.sh
+.nvmrc
 .github/
 
 # TypeScript sources — the browser is served the built .js, not these
@@ -25,9 +29,8 @@ deploy-clean.sh
 tsconfig*.json
 build.mjs
 
-# docs and tests
+# docs and tests. The suites are *.test.ts, already covered by *.ts above.
 *.md
-*.test.mjs
 *.sql
 
 # local secrets, should never exist in a deploy but belt and braces

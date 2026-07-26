@@ -1,6 +1,6 @@
 # PICK THE LOCK — design notes
 
-A browser recreation (vanilla JS + Three.js, no build step) of the lockpicking
+A browser recreation (TypeScript + vendored Three.js, bundled by esbuild) of the lockpicking
 minigame from Dota 2's Dark Carnival event. Gameplay parameters were taken from
 the game's own data file (`scripts/events/dark_carnival/lockpicking/game.vdata`,
 class `CDOTALockpickingGameDefinition`); where the data was ambiguous, values
@@ -57,11 +57,11 @@ recovering, and the boost is forfeited. When the clock runs out the run ends:
 
 ## Simulation
 
-The game proper lives in `engine.js`: a fixed-timestep, seeded, side-effect-free
-core. `index.html` drives and draws it but makes no gameplay decisions of its
-own. A run is fully described by **a seed plus a list of tick-stamped inputs**,
-so it can be replayed anywhere and reproduce the same score exactly — which is
-what lets a leaderboard verify a submitted run instead of trusting a number the
+The game proper lives in `engine.ts`: a fixed-timestep, seeded, side-effect-free
+core. `game.ts` drives and draws it but makes no gameplay decisions of its own.
+A run is fully described by **a seed plus a list of tick-stamped inputs**, so it
+can be replayed anywhere and reproduce the same score exactly — which is what
+lets a leaderboard recompute a submitted run instead of trusting a number the
 client reports. A typical run's inputs encode to well under 200 bytes.
 
 Three properties hold that together, and breaking any of them breaks replay:
@@ -98,13 +98,59 @@ break-even. Measured over 500 seeds, optimal play ends by itself at a median of
 hostile trace from costing a verifier unbounded work — not a fix for a live
 exploit, and it sits above every measured run so it never truncates a real one.
 
-`engine.test.mjs` (`node engine.test.mjs`) guards all of this. Every finished
-run is also replayed in the browser and logged to the console if it diverges, so
-a change that quietly breaks determinism surfaces on the next run.
+`engine.test.ts` (`npm test`) guards all of this. Every finished run is also
+replayed in the browser and logged to the console if it diverges, so a change
+that quietly breaks determinism surfaces on the next run.
 
 There is no leaderboard and no ranked mode: the game is single-player and scores
 stay on the device. The replayability above exists so that adding one later is a
 matter of issuing seeds and verifying traces server-side, rather than a rewrite.
+
+### What replay proves, and what it does not
+
+Replaying a trace proves **this score is reachable from this seed**. It does not
+prove a human reached it, and it is worth being exact about that before a
+leaderboard is built on top of it.
+
+What it does settle is the entire `POST score=999999` class of attack, which is
+essentially all of what a small public leaderboard actually receives. What it
+leaves is one motivated person writing a solver — and a solver is cheap here.
+`engine.test.ts` already contains `perfect`, twenty lines that pin boost on and
+press the first tick a wedge is in range; by construction that is the score
+ceiling, and at ~50 ns a tick it solves a fresh seed in milliseconds. A trace it
+produces is not distinguishable from an honest one by inspection, because both
+are just a list of ticks.
+
+So the residual defence is cost and detection, not proof. In descending order of
+value per unit of work, and none of it built yet:
+
+- **Server-issued seeds, signed, single-use, with a wall-clock floor.** The seed
+  alone buys little — a solver eats a fresh seed instantly. The floor is the
+  part that bites: a seed token minted at *T* and a submission claiming 68 s of
+  simulated time that arrives at *T+3 s* is provably not real-time play, and
+  that is an exact check, not a heuristic. It forces a farmer to sit out every
+  run in real time. **This one shapes the submission API, so it needs deciding
+  before the endpoint exists rather than after.**
+- **Rate limits per account**, which multiply with the floor into a hard ceiling
+  on farm throughput.
+- **Account cost**: `fetchDota2Ownership` in `leaderboard/steam.ts` exists for
+  this and is currently unused. Requiring Dota 2 ownership, playtime and account
+  age makes throwaway accounts cost money. Note the trap the function documents
+  — a private profile returns `null`, and `null` must never read as "does not
+  own it".
+- **Statistical flags, recorded and not enforced.** The `flags` and `verified`
+  columns in `leaderboard/schema.sql` are already shaped for this. The strongest
+  single feature is the distribution of how far each press landed from the wedge
+  window, in ticks: `perfect` fires on the first in-range tick every time, so
+  near-zero variance or a mode pinned to the window edge is a signature. Zero
+  misses over a long run, a boost input sent once at tick 0 and never touched,
+  and inter-press intervals below the human refractory floor are the others.
+  Flag and review — never auto-ban on statistics, or a genuinely good player
+  eventually gets banned by arithmetic.
+
+What is deliberately *not* worth doing: client attestation, obfuscating the
+engine, browser-side anti-cheat. The player controls the client completely, and
+that assumption is the reason the replay design is shaped the way it is.
 
 ## Presentation
 

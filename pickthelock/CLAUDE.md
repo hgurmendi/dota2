@@ -1,7 +1,7 @@
 # PICK THE LOCK — notes for Claude
 
 Browser recreation of Dota 2's Dark Carnival lockpicking minigame.
-Vanilla JS + vendored Three.js, no build step. Two files matter:
+TypeScript + vendored Three.js, bundled by esbuild. Two files matter:
 
 - **`engine.ts`** — the game. A fixed-timestep, seeded, side-effect-free
   simulation with no DOM, audio or rendering. A run is fully described by
@@ -19,7 +19,7 @@ sources. `engine.ts` is checked by *both* tsconfigs because it runs in the
 browser and in the Worker, and both must compile at ES2022 — downlevelling
 either side could change how the arithmetic evaluates.
 
-### Rules for editing `engine.js`
+### Rules for editing `engine.ts`
 
 The header comment states these in full; the short version is: fixed
 timestep only, no `Math.random()`, no `Math.sin/cos/asin/pow` (an ULP of
@@ -34,9 +34,10 @@ the replay diverges, so watch devtools while playing.
 ## Parameters
 
 The game's design and every tunable parameter are documented in
-**`DESIGN.md`**. The gameplay constants sit at the top of `engine.js`,
+**`DESIGN.md`**. The gameplay constants sit at the top of `engine.ts`,
 annotated with the original `m_*` field names from the game's vdata where
-applicable.
+applicable. DESIGN.md also records what replay verification does and does
+not prove, which matters before anything is ranked on it.
 
 **Any change to a gameplay parameter must also be reflected in
 `DESIGN.md`** — keep the two in sync, including which tier the value
@@ -45,9 +46,10 @@ belongs to (exact from vdata / interpreted / tuned by feel).
 ## Working on the game
 
 - ES modules don't load over `file://`: serve the repo root and open
-  `/pickthelock/`. `npm run dev` (from the repo root) serves the site and the
-  leaderboard API together; `python3 -m http.server` also works if only the
-  game matters. See `../DEPLOY.md`.
+  `/pickthelock/`. `npm run dev` (from the repo root) builds first, then serves
+  the site and the leaderboard API together; `python3 -m http.server` also works
+  if only the game matters, but it serves the built bundles rather than the
+  sources, so run `npm run build` after every edit. See `../DEPLOY.md`.
 - `#autostart` hash skips the menu (used for automated screenshots);
   `#calibrate` turns clicks into background-image coordinate readouts
   for positioning scene props.

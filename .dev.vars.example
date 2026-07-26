@@ -2,8 +2,8 @@
 # values that are set as encrypted secrets in production with
 # `wrangler secret put NAME` — they are never stored in the repo.
 #
-# Both plain `node leaderboard/dev-server.mjs` and `wrangler dev` read them;
-# the plain server takes them from the environment instead:
+# `wrangler dev` reads this file. `npm run dev` (the plain node server) takes
+# them from the environment instead:
 #   SESSION_SECRET=... STEAM_API_KEY=... npm run dev
 
 # HMAC key for session cookies. Generate with: openssl rand -base64 32
