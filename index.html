@@ -85,7 +85,27 @@
     transition: border-color 140ms ease, transform 140ms ease;
   }
   .game:hover { border-color: var(--gold); transform: translateY(-2px); }
-  .game .shot { aspect-ratio: 16 / 10; background: #06080d center/cover no-repeat; display: block; }
+  /* The game's own icon from the event's minigame board, sitting in the same
+     hexagonal node frame the game uses there. The two are layered rather than
+     pre-composited so the frame can be reused by every game's card. */
+  .game .shot {
+    aspect-ratio: 16 / 10;
+    display: grid;
+    place-items: center;
+    background:
+      radial-gradient(ellipse at 50% 45%, rgba(201, 169, 79, 0.10) 0%, transparent 62%),
+      #06080d;
+  }
+  .game .icon {
+    width: 45%;
+    max-width: 132px;
+    aspect-ratio: 1;
+    background-image: var(--icon), url('shared/node_frame.webp');
+    background-size: 54% auto, contain;
+    background-position: center, center;
+    background-repeat: no-repeat;
+    filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.55));
+  }
   .game .body { padding: 1rem 1.1rem 1.2rem; }
   .game h2 { margin: 0 0 0.35rem; font-size: 1.05rem; color: var(--gold-bright); font-weight: 700; }
   .game p { margin: 0; font-size: 0.88rem; line-height: 1.5; color: var(--muted); }
@@ -118,7 +138,7 @@
 
   <div class="games">
     <a class="game" href="/pickthelock/">
-      <span class="shot" style="background-image: url('pickthelock/assets/lockpicking_background.webp'); background-position: center 22%;"></span>
+      <span class="shot"><span class="icon" style="--icon: url('pickthelock/assets/icon.webp')"></span></span>
       <span class="body">
         <h2>Pick the Lock</h2>
         <p>Catch the sweeping needle on each bar before the clock runs out.

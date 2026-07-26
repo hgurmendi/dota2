@@ -36,6 +36,13 @@ converts:
 - `panorama/images/events/dark_carnival/lockpicking/` — lock body, dial,
   shackle, sign, dungeon background, Slark head (8×8 flipbook sheet, cropped
   to 2×2 here — see Post-processing) and arm.
+- `panorama/images/events/dark_carnival/overworld/minigames/` — the icon each
+  minigame shows on the event's minigame board. `encounter_pick_the_lock_icon`
+  is this game's, used on the site's game card; its siblings name the other
+  four minigames (`whack_a_mole`, `jail_break`, `blimp_jump`, `assembly`).
+- `panorama/images/events/dark_carnival/overworld/encounter_node_container` —
+  the hexagonal frame those icons sit in on the board. Kept separate rather
+  than pre-composited so every game's card can reuse it.
 - `sounds/misc/dark_carnival/` — lockpick SFX (`lockpick_*`), minigame music
   (`minigame_mus_lp_01..05`), win/lose stingers (`minigame_mus_win/lose_*`).
 - `sounds/vo/event_dark_carnival_slark_games/` — Slark voice lines
