@@ -103,10 +103,84 @@ export const MAX_TICKS = MAX_RUN_TIME * TICK;
 
 const TAU = Math.PI * 2;
 
+// ---------- Types ----------
+
+/** A wedge on the ring. `half` shrinks each tick until the wedge expires. */
+export interface Arc {
+  id: number;
+  center: number;
+  half: number;
+  color: "blue" | "yellow";
+}
+
+/** What the host drains each tick to drive sound and particles. */
+export type SimEvent =
+  | { k: "capture"; angle: number; color: "blue" | "yellow" }
+  | { k: "miss"; angle: number }
+  | { k: "bonus"; amount: number }
+  | { k: "end"; won: boolean; score: number };
+
+export type InputCode = "P" | "B" | "R";
+
+/** One recorded input: the tick it lands on, and what it was. */
+export interface InputEvent {
+  t: number;
+  a: InputCode;
+}
+
+/** The whole simulation. Everything here is derived from a seed and a trace. */
+export interface RunState {
+  seed: number;
+  rng: number;
+  tick: number;
+  over: boolean;
+  won: boolean;
+
+  timeLeft: number;
+  elapsed: number;
+  score: number;
+
+  angle: number;
+  dir: number;
+  curSpeed: number;
+  boostMult: number;
+  boostHeld: boolean;
+
+  missState: 0 | 2 | 3;
+  stallTimer: number;
+  missCd: number;
+
+  blueChance: number;
+  spawnTimer: number;
+  arcs: Arc[];
+  nextArcId: number;
+
+  captures: number;
+  misses: number;
+  blues: number;
+  picks: number;
+
+  events: SimEvent[];
+}
+
+/** The canonical, comparable result of a run. */
+export interface RunSummary {
+  seed: number;
+  score: number;
+  captures: number;
+  misses: number;
+  blues: number;
+  picks: number;
+  ticks: number;
+  duration: number;
+  won: boolean;
+  over: boolean;
+}
+
 // ---------- PRNG ----------
 // mulberry32: 32-bit integer ops plus one division by 2^32, all exactly
 // specified, so the stream is identical on every JS engine.
-function rnd(s) {
+function rnd(s: RunState): number {
   s.rng = (s.rng + 0x6d2b79f5) | 0;
   let t = s.rng;
   t = Math.imul(t ^ (t >>> 15), 1 | t);
@@ -115,20 +189,20 @@ function rnd(s) {
 }
 
 // ---------- Angle helpers ----------
-function norm(a) {
+function norm(a: number): number {
   a %= TAU;
   return a < 0 ? a + TAU : a;
 }
-function angDist(a, b) {
+function angDist(a: number, b: number): number {
   const d = Math.abs(norm(a) - norm(b));
   return Math.min(d, TAU - d);
 }
 
 // ---------- Input codes ----------
-export const PICK = "P";        // primary press: try to capture
-export const BOOST_ON = "B";    // boost held down
-export const BOOST_OFF = "R";   // boost released
-const CODES = { P: 1, B: 1, R: 1 };
+export const PICK: InputCode = "P";        // primary press: try to capture
+export const BOOST_ON: InputCode = "B";    // boost held down
+export const BOOST_OFF: InputCode = "R";   // boost released
+const CODES: Record<string, 1 | undefined> = { P: 1, B: 1, R: 1 };
 
 // ---------- Run state ----------
 
@@ -142,7 +216,7 @@ const CODES = { P: 1, B: 1, R: 1 };
  * nothing but its seed and its trace. No out-of-band starting state means no
  * way for a client and a verifier to disagree about one.
  */
-export function createRun(seed) {
+export function createRun(seed: number): RunState {
   return {
     seed: seed | 0,
     rng: seed | 0,
@@ -160,13 +234,13 @@ export function createRun(seed) {
     boostMult: 1,
     boostHeld: false,
 
-    missState: 0,         // 0 = normal, 2 = stalled, 3 = recovering
+    missState: 0 as 0 | 2 | 3, // 0 = normal, 2 = stalled, 3 = recovering
     stallTimer: 0,
     missCd: 0,            // lockout before another miss can register
 
     blueChance: BLUE_BASE_CHANCE,
     spawnTimer: SPAWN_FIRST,
-    arcs: [],             // {id, center, half, color}
+    arcs: [] as Arc[],
     nextArcId: 0,
 
     captures: 0,
@@ -174,19 +248,19 @@ export function createRun(seed) {
     blues: 0,
     picks: 0,
 
-    events: [],           // host drains these for sound and particles
+    events: [] as SimEvent[], // host drains these for sound and particles
   };
 }
 
 /** Take the events accumulated since the last call. */
-export function drain(s) {
+export function drain(s: RunState): SimEvent[] {
   if (!s.events.length) return s.events;
   const out = s.events;
   s.events = [];
   return out;
 }
 
-function needleOnArc(s, arc) {
+function needleOnArc(s: RunState, arc: Arc): boolean {
   return angDist(s.angle, arc.center) <= arc.half + NEEDLE_GRACE;
 }
 
@@ -196,7 +270,7 @@ function needleOnArc(s, arc) {
  * the hit logic: the test bot uses it, and the leaderboard's bot detection
  * will use it to measure how far each press landed from the ideal moment.
  */
-export function wedgeUnderNeedle(s) {
+export function wedgeUnderNeedle(s: RunState): number {
   for (let i = 0; i < s.arcs.length; i++) {
     if (needleOnArc(s, s.arcs[i])) return i;
   }
@@ -206,7 +280,7 @@ export function wedgeUnderNeedle(s) {
 // ---------- Inputs ----------
 
 /** Primary press. Captures the wedge under the needle, or takes the miss penalty. */
-export function pick(s) {
+export function pick(s: RunState): void {
   if (s.over) return;
   s.picks++;
 
@@ -251,20 +325,20 @@ export function pick(s) {
 }
 
 /** Boost held / released (RMB, S, or the boost-lock toggle). */
-export function setBoost(s, held) {
+export function setBoost(s: RunState, held: boolean): void {
   if (s.over) return;
   s.boostHeld = !!held;
 }
 
 /** Apply one recorded input code. */
-export function applyInput(s, code) {
+export function applyInput(s: RunState, code: InputCode): void {
   if (code === PICK) pick(s);
   else if (code === BOOST_ON) setBoost(s, true);
   else if (code === BOOST_OFF) setBoost(s, false);
 }
 
 // ---------- Spawning ----------
-function trySpawnArc(s) {
+function trySpawnArc(s: RunState): void {
   if (s.arcs.length >= MAX_ARCS) return;
   const half = WEDGE_HALF;
   for (let attempt = 0; attempt < SPAWN_TRIES; attempt++) {
@@ -289,7 +363,7 @@ function trySpawnArc(s) {
 // ---------- Step ----------
 
 /** Advance exactly one tick. Inputs for this tick must be applied first. */
-export function step(s) {
+export function step(s: RunState): void {
   if (s.over) return;
   s.tick++;
 
@@ -348,7 +422,7 @@ export function step(s) {
 // "1cP2sB9P". Lowercase digits never collide with the uppercase codes, so the
 // string needs no separators. A 60s run is a few hundred bytes.
 
-export function encodeInputs(inputs) {
+export function encodeInputs(inputs: InputEvent[]): string {
   let prev = 0, out = "";
   for (const e of inputs) {
     out += (e.t - prev).toString(36) + e.a;
@@ -357,8 +431,8 @@ export function encodeInputs(inputs) {
   return out;
 }
 
-export function decodeInputs(str) {
-  const out = [];
+export function decodeInputs(str: string): InputEvent[] {
+  const out: InputEvent[] = [];
   if (!str) return out;
   let prev = 0;
   const re = /([0-9a-z]+)([PBR])/g;
@@ -368,7 +442,7 @@ export function decodeInputs(str) {
     consumed = re.lastIndex;
     const t = prev + parseInt(m[1], 36);
     if (!(t >= prev)) throw new Error("bad input trace");
-    out.push({ t, a: m[2] });
+    out.push({ t, a: m[2] as InputCode });
     prev = t;
   }
   if (consumed !== str.length) throw new Error("bad input trace");
@@ -385,7 +459,7 @@ export function decodeInputs(str) {
  * Throws on a malformed trace. Never trusts the caller for termination — the
  * MAX_TICKS bound holds even if the tunables are later changed badly.
  */
-export function simulate(seed, inputs) {
+export function simulate(seed: number, inputs: string | InputEvent[]): RunSummary {
   const list = typeof inputs === "string" ? decodeInputs(inputs) : inputs;
   const s = createRun(seed);
   let i = 0;
@@ -407,7 +481,7 @@ export function simulate(seed, inputs) {
 }
 
 /** The canonical, comparable result of a run. */
-export function summary(s) {
+export function summary(s: RunState): RunSummary {
   return {
     seed: s.seed,
     score: s.score,
@@ -423,7 +497,7 @@ export function summary(s) {
 }
 
 /** True if two summaries describe the same run. */
-export function sameResult(a, b) {
+export function sameResult(a: RunSummary, b: RunSummary): boolean {
   return a.score === b.score && a.captures === b.captures && a.misses === b.misses &&
          a.blues === b.blues && a.picks === b.picks && a.ticks === b.ticks &&
          a.won === b.won;

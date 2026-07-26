@@ -13,7 +13,9 @@ encrypted and never returns them, so they are set once with
 
 | | |
 |---|---|
-| `wrangler.toml` | Worker name, entry point, assets, bindings, test gate |
+| `wrangler.toml` | Worker name, entry point, assets, bindings, build+test gate |
+| `tsconfig.*.json` | browser and Worker are checked separately; see the base config |
+| `build.mjs` | esbuild step for the browser bundles |
 | `.assetsignore` | what is **not** uploaded — server code, docs, tests, tooling |
 | `leaderboard/schema.sql` | D1 schema (players + per-game runs) |
 | `.dev.vars.example` | template for local secrets; copy to `.dev.vars` |
@@ -27,10 +29,16 @@ upload `node_modules/` and fails on the 25 MiB asset limit. It is what keeps
 
 ```bash
 npm install
-npm test                  # engine determinism + auth suites, ~0.4s
-npm run dev               # plain node, no Cloudflare account needed
+npm run build             # browser bundles (gitignored artifacts)
+npm test                  # type-check both projects, then both suites
+npm run dev               # builds, then serves on plain node
 npm run dev:wrangler      # wrangler dev — closer to production, emulates D1
 ```
+
+The sources are TypeScript. Wrangler compiles the Worker itself; `npm run
+build` produces the browser bundles with esbuild. Both target ES2022 —
+`pickthelock/engine.ts` runs on both sides and the leaderboard depends on
+them agreeing, so neither may be downlevelled.
 
 `npm run dev` serves <http://localhost:8787/>. Steam accepts
 an `http://localhost` `return_to`, so a real end-to-end login can be tested
@@ -72,9 +80,14 @@ Each step is one command; nothing here is reversible-by-accident.
 6. **Attach the domain.** Uncomment the `[[routes]]` block in `wrangler.toml`
    with the real hostname and deploy again.
 
-7. **Connect Git** (optional, restores push-to-deploy): Workers dashboard →
-   the Worker → Settings → Builds → connect the GitHub repo. Cloudflare then
-   runs `npm test` via the `[build]` command on each push.
+7. **Connect Git so the Worker tracks `main`.** Workers dashboard → the
+   Worker → Settings → Builds → connect `hgurmendi/dota2`, branch `main`.
+   Cloudflare then runs the `[build]` command (build + type-check + tests) on
+   every push and deploys only if it passes.
+
+   Until this is connected the deployed Worker is whatever was last pushed by
+   hand from a laptop, which can silently drift from `main`. `wrangler
+   deployments list` shows what is actually live.
 
 ## Notes
 

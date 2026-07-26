@@ -1,0 +1,33 @@
+{
+  // Shared compiler settings. Type checking only — `tsc` never emits.
+  //
+  // Browser and Worker code are checked separately (tsconfig.browser.json,
+  // tsconfig.worker.json) because their globals genuinely differ: the Worker
+  // has @cloudflare/workers-types, the browser has the DOM, and letting one
+  // shadow the other silently mistypes things like Element.append.
+  //
+  // pickthelock/engine.ts is deliberately in BOTH. It runs in the browser and
+  // in the Worker that verifies submitted runs, and the leaderboard rests on
+  // those producing identical results — so it must hold under both sets of
+  // globals and compile at the same target. ES2022 leaves arithmetic alone.
+  // Do not downlevel it.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+
+    "strict": true,
+    // noUncheckedIndexedAccess is deliberately off: it would force non-null
+    // assertions through the simulation's hot loops, adding noise to code
+    // whose expressions must stay exactly as they are. Worth revisiting.
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  }
+}

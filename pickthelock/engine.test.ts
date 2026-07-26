@@ -5,21 +5,22 @@
  * described by its seed plus its input trace, and replaying it anywhere
  * reproduces the score exactly. Run this after touching engine.js.
  */
+import type { InputCode, InputEvent, RunState, RunSummary } from "./engine.ts";
 import {
   createRun, step, pick, setBoost, drain, simulate, summary, sameResult,
   encodeInputs, decodeInputs, wedgeUnderNeedle,
   TICK, MAX_RUN_TIME, MAX_TICKS, HIT_SCORE, PICK, BOOST_ON, BOOST_OFF,
-} from "./engine.js";
+} from "./engine.ts";
 
 let passed = 0, failed = 0;
-function check(name, cond, detail = "") {
+function check(name: string, cond: boolean, detail: unknown = "") {
   if (cond) { passed++; console.log("  ok   " + name); }
   else { failed++; console.log("  FAIL " + name + (detail ? "  — " + detail : "")); }
 }
-function section(name) { console.log("\n" + name); }
+function section(name: string) { console.log("\n" + name); }
 
 // A deterministic stand-in for Math.random so the test itself is reproducible.
-function lcg(seed) {
+function lcg(seed: number) {
   let x = seed >>> 0;
   return () => { x = (Math.imul(x, 1664525) + 1013904223) >>> 0; return x / 4294967296; };
 }
@@ -28,9 +29,9 @@ function lcg(seed) {
  * Drive a run with a policy and record the input trace the host would record.
  * policy(state) -> "P" | "B" | "R" | null, called once per tick.
  */
-function play(seed, policy) {
+function play(seed: number, policy: (s: RunState) => InputCode | null | undefined) {
   const s = createRun(seed);
-  const inputs = [];
+  const inputs: InputEvent[] = [];
   while (!s.over && s.tick < MAX_TICKS) {
     const a = policy(s);
     if (a) { inputs.push({ t: s.tick, a }); applyOne(s, a); }
@@ -39,7 +40,7 @@ function play(seed, policy) {
   }
   return { inputs, result: summary(s) };
 }
-function applyOne(s, a) {
+function applyOne(s: RunState, a: InputCode) {
   if (a === PICK) pick(s);
   else if (a === BOOST_ON) setBoost(s, true);
   else if (a === BOOST_OFF) setBoost(s, false);
@@ -47,17 +48,17 @@ function applyOne(s, a) {
 
 // Plays like a bot: boost pinned on, press the instant a wedge is under the
 // needle. This is the upper bound on what any input trace can achieve.
-const perfect = (s) => {
+const perfect = (s: RunState): InputCode | null => {
   if (!s.boostHeld) return BOOST_ON;
   return wedgeUnderNeedle(s) >= 0 ? PICK : null;
 };
 
 // Plays like a person: presses near the wedge but with reaction lag and
 // jitter, and occasionally mashes at nothing.
-function human(seed) {
+function human(seed: number) {
   const r = lcg(seed);
   let cooldown = 0;
-  return (s) => {
+  return (s: RunState): InputCode | null => {
     if (s.tick === 0) return BOOST_ON;
     if (cooldown > 0) { cooldown--; return null; }
     if (wedgeUnderNeedle(s) >= 0 && r() < 0.06) { cooldown = 12; return PICK; }
@@ -114,9 +115,9 @@ section("input trace encoding");
 
 section("malformed traces are rejected, not simulated");
 {
-  const cases = [
+  const cases: [InputEvent[], string][] = [
     [[{ t: 5, a: PICK }, { t: 3, a: PICK }], "out of order"],
-    [[{ t: 0, a: "Z" }], "unknown code"],
+    [[{ t: 0, a: "Z" as InputCode }], "unknown code"],
     [[{ t: MAX_TICKS + 50, a: PICK }], "input past end of run"],
   ];
   for (const [inputs, label] of cases) {
@@ -128,7 +129,7 @@ section("malformed traces are rejected, not simulated");
 
 section("score is always captures * " + HIT_SCORE);
 {
-  let ok = true, worst = null;
+  let ok = true, worst: RunSummary | null = null;
   for (let seed = 1; seed <= 40; seed++) {
     const r = play(seed, human(seed)).result;
     if (r.score !== r.captures * HIT_SCORE) { ok = false; worst = r; }
@@ -156,7 +157,7 @@ section("fuzz: random traces never hang or throw");
   for (let seed = 1; seed <= 200; seed++) {
     const r = lcg(seed);
     try {
-      const res = play(seed, () => {
+      const res = play(seed, (): InputCode | null => {
         const v = r();
         if (v < 0.02) return PICK;
         if (v < 0.024) return BOOST_ON;
@@ -165,7 +166,7 @@ section("fuzz: random traces never hang or throw");
       }).result;
       if (!res.over) { ok = false; detail = `seed ${seed} never ended`; break; }
       if (!(res.duration <= MAX_RUN_TIME + 1e-6)) { ok = false; detail = `seed ${seed} ran ${res.duration}s`; break; }
-    } catch (e) { ok = false; detail = `seed ${seed}: ${e.message}`; break; }
+    } catch (e) { ok = false; detail = `seed ${seed}: ${(e as Error).message}`; break; }
   }
   check("200 random runs", ok, detail);
 }

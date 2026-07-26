@@ -3,14 +3,21 @@
 Browser recreation of Dota 2's Dark Carnival lockpicking minigame.
 Vanilla JS + vendored Three.js, no build step. Two files matter:
 
-- **`engine.js`** — the game. A fixed-timestep, seeded, side-effect-free
+- **`engine.ts`** — the game. A fixed-timestep, seeded, side-effect-free
   simulation with no DOM, audio or rendering. A run is fully described by
   a seed plus tick-stamped inputs, and replaying it must reproduce the
   score exactly; that is what will let a leaderboard verify submitted runs
   instead of trusting a client-reported score.
-- **`index.html`** — the host. Drives and draws the sim, and owns
-  everything the sim must not know about (sound, particles, screens,
-  input devices). **It must never make a gameplay decision of its own.**
+- **`game.ts`** — the host. Drives and draws the sim, and owns everything
+  the sim must not know about (sound, particles, screens, input devices).
+  **It must never make a gameplay decision of its own.** `index.html` is
+  now just the shell that loads the built `game.js`.
+
+Everything is TypeScript. `npm run build` produces the browser bundles
+(`game.js` is gitignored); Wrangler compiles the Worker from the same
+sources. `engine.ts` is checked by *both* tsconfigs because it runs in the
+browser and in the Worker, and both must compile at ES2022 — downlevelling
+either side could change how the arithmetic evaluates.
 
 ### Rules for editing `engine.js`
 
@@ -20,7 +27,7 @@ disagreement between JS engines can flip a hit into a miss), no `Date` or
 `performance.now()`. Constants derived from transcendentals are written
 out as literals with the expression in the comment.
 
-Run **`node engine.test.mjs`** after any change to it. The host also
+Run **`npm test`** (type-check plus both suites) after any change to it. The host also
 re-simulates every finished run in the browser and logs to the console if
 the replay diverges, so watch devtools while playing.
 

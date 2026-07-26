@@ -8,7 +8,7 @@
 # must never appear in this file, which is committed.
 
 name = "dota2"
-main = "worker/index.js"
+main = "worker/index.ts"
 compatibility_date = "2026-07-01"
 
 # One origin, deliberately. The OpenID return_to is built from whichever origin
@@ -29,10 +29,11 @@ run_worker_first = ["/api/*"]
 [observability]
 enabled = true
 
-# Runs before every deploy, locally and in Workers Builds. The leaderboard
-# rests on a run being reproducible from its seed and inputs, so a change that
-# breaks determinism must not be deployable — a failing command fails the
-# deploy. This replaces the test gate that lived in the old Pages build script.
+# Runs before every deploy, locally and in Workers Builds: builds the browser
+# bundles, type-checks both projects, runs the suites, and verifies the built
+# engine still replays identically to its source. The leaderboard rests on a
+# run being reproducible from its seed and inputs, so a change that breaks
+# determinism must not be deployable — a failing command fails the deploy.
 [build]
 command = "npm test"
 
@@ -41,7 +42,7 @@ command = "npm test"
 #
 # database_id is an identifier, not a credential, so it belongs in the repo.
 # The binding is DB, not the database name Cloudflare's snippet suggests —
-# leaderboard/handlers.js reads env.DB.
+# leaderboard/handlers.ts reads env.DB.
 [[d1_databases]]
 binding = "DB"
 database_name = "dota2"

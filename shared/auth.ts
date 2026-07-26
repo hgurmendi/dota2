@@ -12,17 +12,30 @@
  * its seed and inputs.
  */
 
+export interface Session {
+  authenticated: true;
+  steamid: string;
+  persona: string | null;
+  avatar: string | null;
+  expires: number;
+}
+
+export interface LeaderboardStatus {
+  auth: boolean;
+  submissions: boolean;
+}
+
 /**
  * Who is signed in, or null. Never throws and never blocks a game from
  * starting: if the API is unreachable, the answer is simply "signed out".
  *
  * @returns {Promise<null | {steamid, persona, avatar, expires}>}
  */
-export async function getSession() {
+export async function getSession(): Promise<Session | null> {
   try {
     const res = await fetch("/api/me", { credentials: "same-origin", cache: "no-store" });
     if (!res.ok) return null;                       // 401 signed out, 403 banned
-    const body = await res.json();
+    const body = await res.json() as Session | { authenticated: false };
     return body.authenticated ? body : null;
   } catch {
     return null;
@@ -34,12 +47,12 @@ export async function getSession() {
  * validated server-side and only same-origin paths are honoured, so a caller
  * cannot turn this into an open redirect.
  */
-export function signInUrl(next = location.pathname + location.search + location.hash) {
+export function signInUrl(next: string = location.pathname + location.search + location.hash): string {
   return `/api/auth/steam?next=${encodeURIComponent(next)}`;
 }
 
 /** Drop the session cookie. Resolves once the server has cleared it. */
-export async function signOut() {
+export async function signOut(): Promise<void> {
   try {
     await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
   } catch {
@@ -54,11 +67,11 @@ export async function signOut() {
  *
  * @returns {Promise<{auth: boolean, submissions: boolean}>}
  */
-export async function leaderboardStatus() {
+export async function leaderboardStatus(): Promise<LeaderboardStatus> {
   try {
     const res = await fetch("/api/status", { cache: "no-store" });
     if (!res.ok) throw new Error("unavailable");
-    const body = await res.json();
+    const body = await res.json() as { auth?: unknown; submissions?: unknown };
     return { auth: !!body.auth, submissions: !!body.submissions };
   } catch {
     return { auth: false, submissions: false };

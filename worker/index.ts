@@ -9,10 +9,15 @@
 // that happen (run_worker_first) would bill an invocation for every static
 // request it covered, to protect files that are already not published.
 
-import { handle } from "../leaderboard/handlers.js";
+import { handle } from "../leaderboard/handlers.ts";
+import type { Env as ApiEnv } from "../leaderboard/handlers.ts";
+
+interface Env extends ApiEnv {
+  ASSETS: Fetcher;
+}
 
 export default {
-  async fetch(request, env) {
+  async fetch(request: Request, env: Env): Promise<Response> {
     const { pathname } = new URL(request.url);
     if (pathname === "/api" || pathname.startsWith("/api/")) {
       return handle(request, env);

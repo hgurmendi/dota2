@@ -1,0 +1,1430 @@
+"use strict";
+
+import * as THREE from "three";
+// Raw color pipeline: hex values pass straight through to the screen like the
+// Canvas 2D version (no sRGB/linear conversions to keep art colors identical).
+THREE.ColorManagement.enabled = false;
+
+// The game itself lives in engine.js: a fixed-timestep, seeded, side-effect-free
+// simulation. This file drives it and draws it, and owns everything the sim must
+// not know about — sound, particles, screens, input devices. It must never make a
+// gameplay decision of its own: a run has to stay reproducible from its seed and
+// its recorded inputs alone, because that is what lets a leaderboard verify it.
+import * as ENGINE from "./engine.js";
+import type { RunState, SimEvent, InputCode } from "./engine.js";
+
+const glCanvas = document.getElementById("gl") as HTMLCanvasElement;
+const ui = (document.getElementById("ui") as HTMLCanvasElement).getContext("2d")!;
+
+// ---------- Simulation ----------
+// Every gameplay parameter, and the reasoning behind each one, lives in
+// engine.js and DESIGN.md. Nothing tunable belongs in this file.
+//
+// These are named imports rather than a destructure of the ENGINE namespace on
+// purpose: a name that engine.js doesn't export fails at load with an error
+// pointing straight at it, instead of quietly becoming undefined.
+import {
+  createRun, step, applyInput, drain, simulate, summary, sameResult,
+  encodeInputs, PICK, BOOST_ON, BOOST_OFF, MAX_ARCS, WEDGE_HALF, DT,
+} from "./engine.js";
+
+const TAU = Math.PI * 2;
+
+const FONT = '"Radiance", Georgia, "Times New Roman", serif';
+const FONT_NUM = '"RadianceM", "Radiance", Georgia, serif'; // fixed-width digits
+
+// ---------- Assets ----------
+// WebP: the scene art is painted, so PNG was storing it at ~15x the size for
+// no visible gain (3.9MB of assets became 226KB). The two additive effect
+// textures stay PNG — they are tiny and lossy banding would show in the glow.
+// Browser support is a non-issue: the importmap above already requires a
+// browser far newer than WebP.
+const TEX_NAMES = {
+  bg:    "assets/lockpicking_background.webp",
+  lock:  "assets/lock_background.webp",
+  dial:  "assets/lock_dial.webp",
+  shank: "assets/lock_shank.webp",
+  slark: "assets/slark_head.webp",
+  arm:   "assets/slark_arm.webp",
+  flare: "assets/yellowflare2.png",
+  glow:  "assets/softglow_tra.png",
+};
+// Slark's head is a sprite sheet of 420x500 frames. The extracted sheet is 8x8
+// (64 blink/eye variants) but the game only ever shows three of them, so it is
+// cropped to the top-left 2x2 block: idle, blink, and the capture reaction.
+const SLARK_COLS = 2, SLARK_ROWS = 2;
+let slarkBlink = 0;      // time left showing the blink frame
+let slarkReact = 0;      // time left showing the reaction frame (on capture)
+let slarkNext = 2;       // countdown to the next idle blink
+
+const TEX: Record<string, THREE.Texture> = {};
+const signImg = new Image();   // sign renders on the 2D UI layer
+signImg.src = "assets/sign.webp";
+let assetsReady = false;
+
+const SFX = {
+  success: "assets/lockpick_success.mp3",
+  miss:    "assets/lockpick_break.mp3",
+  boost:   "assets/lockpick_boost.mp3",
+};
+function playSfx(name: keyof typeof SFX, vol = 0.6) {
+  if (!sfxOn) return;
+  const a = new Audio(SFX[name]);
+  a.volume = vol;
+  a.play().catch(() => {}); // ignore autoplay restrictions
+}
+
+// looping background music (random lockpick track per run) + end stingers/VO
+const MUSIC_TRACKS = [1, 2, 3, 4, 5].map(i => "assets/minigame_mus_lp_0" + i + ".mp3");
+const LOSE_STINGERS = ["assets/minigame_mus_lose_01.mp3", "assets/minigame_mus_lose_02.mp3"];
+const WIN_STINGER = "assets/minigame_mus_win_01.mp3";
+const LOSE_VO = [1, 2, 3, 4, 5].map(i => "assets/slark_lockpick_gameover_0" + i + ".mp3");
+const WIN_VO = [1, 3, 4, 6].map(i => "assets/slark_lockpick_unlocked_0" + i + ".mp3");
+let musicEl: HTMLAudioElement | null = null;
+let sfxOn = true, musicOn = true; // separate toggles: effects vs music+voice
+try {
+  sfxOn = localStorage.getItem("lockpick_sfx") !== "0";
+  musicOn = localStorage.getItem("lockpick_music") !== "0";
+} catch (e) {}
+function setSfx(on: boolean) {
+  sfxOn = on;
+  try { localStorage.setItem("lockpick_sfx", on ? "1" : "0"); } catch (e) {}
+}
+function setMusic(on: boolean) {
+  musicOn = on;
+  try { localStorage.setItem("lockpick_music", on ? "1" : "0"); } catch (e) {}
+  if (musicEl) musicEl.volume = on ? 0.35 : 0;
+}
+function startMusic() {
+  stopMusic();
+  musicEl = new Audio(MUSIC_TRACKS[(Math.random() * MUSIC_TRACKS.length) | 0]);
+  musicEl.loop = true;
+  musicEl.volume = musicOn ? 0.35 : 0;
+  musicEl.play().catch(() => {});
+}
+function stopMusic() {
+  if (musicEl) { musicEl.pause(); musicEl = null; }
+}
+function playFile(src: string, vol: number) {
+  if (!musicOn) return;
+  const a = new Audio(src);
+  a.volume = vol;
+  a.play().catch(() => {});
+}
+
+// ---------- Layout ----------
+// Lock geometry (measured from the source lock_background_psd.png):
+// image is 700x700, face circle center (345,346) radius 345,
+// recessed hole (where wedges live) starts at 0.82 of that radius.
+const HOLE_FRAC = 0.82;
+const LOCK_CX_FRAC = 345 / 700, LOCK_CY_FRAC = 346 / 700, LOCK_R_FRAC = 345 / 700;
+// letterboxed stage laid out in stage units. Fixed aspect matching the
+// original popup dialog so the composition is identical at every viewport
+// size; the dimmed backdrop fills the remaining space.
+const STAGE_ASPECT = 0.76;
+let W: number, H: number, SX: number, SY: number, SW: number, SH: number,
+    CX: number, CY: number, R_LOCK: number, R_HOLE: number, R_DIAL: number,
+    R_WEDGE_IN: number, R_WEDGE_OUT: number;
+
+// ---------- Game state ----------
+// `phase` is which screen we are on; the simulation only knows running vs over.
+type Phase = "menu" | "playing" | "gameover";
+let phase: Phase = "menu";
+let run: RunState;            // the live simulation (engine.ts)
+let trace: ENGINE.InputEvent[] = [];               // this run's inputs, stamped with the tick they land on
+let pending: InputCode[] = [];             // inputs waiting for the next tick boundary
+let acc = 0;                  // wall-clock time not yet converted into ticks
+let boostSent = false;        // last boost state handed to the sim (edge detection)
+interface ArchivedRun {
+  seed: number;
+  inputs: string;
+  result: ENGINE.RunSummary;
+  verified: boolean;
+}
+let lastRun: ArchivedRun | null = null;           // the finished run: seed, trace, result (see archiveRun)
+
+// Seeds are generated locally. If a leaderboard is ever added, submitted runs
+// will need theirs issued by the server instead — a client that picks its own
+// seed can keep rerolling until it gets a favourable board.
+function newSeed() {
+  const b = new Uint32Array(1);
+  crypto.getRandomValues(b);
+  return b[0] | 0;
+}
+run = createRun(newSeed());   // so the menu has a valid needle angle to draw
+
+// ---------- Presentation state ----------
+// None of this may feed back into the simulation.
+let fastHeld = false;
+let keyBoostHeld = false;     // S held: keyboard equivalent of RMB boost
+/** "+1.5" style popup on the dial. */
+interface Floater { text: string; age: number; }
+/** One particle: needle trail, capture burst, miss spark or candle flame. */
+interface Sparkle {
+  x: number; y: number; vx: number; vy: number;
+  age: number; life: number; size: number;
+  color: number[]; drag: number; grav: number;
+}
+let centerFloaters: Floater[] = [];
+let sparkles: Sparkle[] = [];  // needle trail + capture bursts
+                              // {x, y, vx, vy, age, life, size, color:[r,g,b], drag, grav}
+let displayScore = 0;         // rolls up continuously toward the real score
+let best = 0;
+try { best = parseInt(localStorage.getItem("lockpick_best") ?? "", 10) || 0; } catch (e) {}
+let restartLock = 0;          // seconds after losing during which clicks can't restart
+let boostLocked = false;      // on-screen toggle equivalent to holding RMB
+try { boostLocked = localStorage.getItem("lockpick_boostlock") === "1"; } catch (e) {}
+let paused = false;           // P toggles during play
+let shankPop = 0;             // 0 closed .. 1 pried open (win animation)
+let shankBaseY = 0;           // shackle rest position, set in layout()
+let slarkRestY = 0, armRestY = 0; // idle-bob rest positions, set in layout()
+let sparkT = 1e9;             // time since the last miss spark flash
+let sparkX = 0, sparkY = 0, sparkRot = 0;
+let shockT = 1e9;             // time since the last miss (shake + red wash)
+
+function hexRGB(hex: string): number[] {
+  const n = parseInt(hex.slice(1), 16);
+  return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+}
+
+// spark burst at the needle's position on the ring when a wedge is captured
+const BURST_PALETTES = {
+  blue:   ["#6fc3ff", "#a8dcff", "#ffffff", "#3fa9ff"].map(h => hexRGB(h).map(c => c * 1.35)),
+  yellow: ["#ffdf6b", "#ffc93f", "#ffffff", "#ffb347"].map(h => hexRGB(h).map(c => c * 1.35)),
+};
+const TRAIL_COLOR = hexRGB("#b48cff");
+const FLAME_PALETTE = ["#fff3c8", "#ffd23f", "#ffa02e", "#ff7a1a"].map(hexRGB);
+function spawnBurst(ang: number, color: "blue" | "yellow") {
+  const r0 = (R_WEDGE_IN + R_WEDGE_OUT) / 2;
+  const bx = CX + Math.cos(ang) * r0;
+  const by = CY - Math.sin(ang) * r0;
+  const palette = BURST_PALETTES[color];
+  for (let i = 0; i < 46; i++) {
+    const a = Math.random() * TAU;
+    const sp = 70 + Math.random() * 330;
+    sparkles.push({
+      x: bx, y: by,
+      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      age: 0, life: 0.5 + Math.random() * 0.5,
+      size: 4.5 + Math.random() * 6,
+      color: palette[(Math.random() * palette.length) | 0],
+      drag: 2.5, grav: 140,
+    });
+  }
+}
+
+// miss: a spark star flashes on the needle at the ring and golden sparks
+// scatter from it (the red comes from the needle's glow, like the game)
+const MISS_PALETTE = ["#ffd23f", "#ffb347", "#ffe98a", "#ff8d3c"].map(hexRGB);
+function spawnMissBurst(ang: number) {
+  const r0 = (R_WEDGE_IN + R_WEDGE_OUT) / 2;
+  sparkX = CX + Math.cos(ang) * r0;
+  sparkY = CY - Math.sin(ang) * r0;
+  sparkRot = Math.random() * TAU;
+  sparkT = 0;
+  for (let i = 0; i < 40; i++) {
+    const a = Math.random() * TAU;
+    const sp = 80 + Math.random() * 320;
+    sparkles.push({
+      x: sparkX, y: sparkY,
+      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      age: 0, life: 0.3 + Math.random() * 0.5,
+      size: 2 + Math.random() * 3.5,
+      color: MISS_PALETTE[(Math.random() * MISS_PALETTE.length) | 0],
+      drag: 2.2, grav: 260,
+    });
+  }
+}
+
+// ---------- Input ----------
+glCanvas.addEventListener("contextmenu", e => e.preventDefault());
+
+function startRun() {
+  run = createRun(newSeed());
+  trace = [];
+  pending = [];
+  acc = 0;
+  boostSent = false;          // syncBoost re-sends the live boost state on tick 0
+  displayScore = 0;
+  centerFloaters = [];
+  sparkles = [];
+  paused = false;
+  shankPop = 0;
+  sparkT = 1e9;
+  shockT = 1e9;
+  phase = "playing";
+  startMusic();
+  // boostLocked deliberately survives restarts
+}
+
+// on-screen corner buttons (mobile): restart bottom-left, boost-lock bottom-right,
+// anchored inside the letterboxed stage
+let BTN_R = 34, BTN_PAD = 22; // scaled with the stage in resize()
+const IS_TOUCH = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+let hoverBtn: string | null = null; // desktop: button under the mouse (for tooltips)
+function buttonRects() {
+  return {
+    restart: { x: SX + BTN_PAD + BTN_R, y: SY + SH - BTN_PAD - BTN_R },
+    boost:   { x: SX + SW - BTN_PAD - BTN_R, y: SY + SH - BTN_PAD - BTN_R },
+    music:   { x: SX + SW - BTN_PAD - BTN_R, y: SY + BTN_PAD + BTN_R },
+    sfx:     { x: SX + SW - BTN_PAD - BTN_R * 3 - 12, y: SY + BTN_PAD + BTN_R },
+  };
+}
+function hitButton(px: number, py: number): string | null {
+  const b = buttonRects();
+  if (Math.hypot(px - b.restart.x, py - b.restart.y) <= BTN_R) return "restart";
+  if (Math.hypot(px - b.boost.x, py - b.boost.y) <= BTN_R) return "boost";
+  if (Math.hypot(px - b.music.x, py - b.music.y) <= BTN_R) return "music";
+  if (Math.hypot(px - b.sfx.x, py - b.sfx.y) <= BTN_R) return "sfx";
+  return null;
+}
+function pressButton(name: string) {
+  if (name === "restart") { startRun(); return; } // like R: works any time
+  if (name === "music") { setMusic(!musicOn); return; }
+  if (name === "sfx") { setSfx(!sfxOn); return; }
+  boostLocked = !boostLocked;
+  try { localStorage.setItem("lockpick_boostlock", boostLocked ? "1" : "0"); } catch (e) {}
+  if (boostLocked && !paused && !fastHeld && !keyBoostHeld) playSfx("boost", 0.45);
+}
+
+// Everything the player does during a run becomes a recorded input. The host
+// never reaches into the simulation directly, and never decides an outcome.
+function queueInput(code: InputCode) {
+  pending.push(code);
+}
+
+// Boost is held state assembled from three sources (RMB, S, the lock toggle),
+// so it reaches the sim as edges rather than as a poll.
+function syncBoost() {
+  const held = fastHeld || keyBoostHeld || boostLocked;
+  if (held === boostSent) return;
+  boostSent = held;
+  queueInput(held ? BOOST_ON : BOOST_OFF);
+}
+
+function primaryAction() {
+  if (phase === "playing") {
+    if (paused) return;       // no picks while paused
+    queueInput(PICK);         // the sim decides capture vs miss
+    return;
+  }
+  if (phase === "gameover" && restartLock > 0) return; // misclick guard
+  startRun();
+}
+
+// #calibrate mode: click anywhere to read background-image coordinates
+const CALIBRATING = location.hash.includes("calibrate");
+if (CALIBRATING) {
+  const panel = document.createElement("div");
+  panel.style.cssText = "position:fixed;top:8px;left:8px;z-index:10;color:#0f0;" +
+    "background:rgba(0,0,0,0.8);font:14px monospace;padding:8px;white-space:pre";
+  panel.textContent = "CALIBRATE: click the flame spots\n";
+  document.body.appendChild(panel);
+  glCanvas.addEventListener("mousedown", e => {
+    const ix = Math.round((e.clientX - CX) / flameScale + 600);
+    const iy = Math.round((e.clientY - SY) / flameScale);
+    panel.textContent += `(${ix}, ${iy})\n`;
+  });
+}
+
+glCanvas.addEventListener("mousedown", e => {
+  if (CALIBRATING) return; // clicks only report coordinates in this mode
+  if (e.button === 2) {
+    // sound only mid-run: no boost whoosh on the menu/game-over screens
+    if (!fastHeld && !keyBoostHeld && !boostLocked && phase === "playing" && !paused) playSfx("boost", 0.45);
+    fastHeld = true;
+    return;
+  }
+  if (e.button !== 0) return;
+  const btn = hitButton(e.clientX, e.clientY);
+  if (btn) { pressButton(btn); return; }
+  primaryAction();
+});
+
+// tap = left click; buttons are hit-tested first. preventDefault stops the
+// browser from also firing a synthetic mousedown for the same tap
+glCanvas.addEventListener("touchstart", e => {
+  e.preventDefault();
+  const t = e.changedTouches[0];
+  const btn = hitButton(t.clientX, t.clientY);
+  if (btn) { pressButton(btn); return; }
+  primaryAction();
+}, { passive: false });
+
+// desktop hover tracking for button tooltips
+glCanvas.addEventListener("mousemove", e => {
+  hoverBtn = hitButton(e.clientX, e.clientY);
+});
+
+window.addEventListener("mouseup", e => {
+  if (e.button === 2) fastHeld = false;
+});
+window.addEventListener("keyup", e => {
+  if (e.key === "s" || e.key === "S") keyBoostHeld = false;
+});
+window.addEventListener("blur", () => { fastHeld = false; keyBoostHeld = false; });
+
+window.addEventListener("keydown", e => {
+  if (e.key === "r" || e.key === "R") startRun();
+  if ((e.key === "t" || e.key === "T") && !e.repeat) pressButton("boost");
+  if ((e.key === "p" || e.key === "P") && phase === "playing") {
+    paused = !paused;
+    if (musicEl) { if (paused) musicEl.pause(); else musicEl.play().catch(() => {}); }
+    if (!paused) acc = 0;     // don't bank the wall-clock time spent paused
+  }
+  if ((e.key === "s" || e.key === "S") && !e.repeat) {
+    if (!fastHeld && !keyBoostHeld && !boostLocked && phase === "playing" && !paused) {
+      playSfx("boost", 0.45);
+    }
+    keyBoostHeld = true;
+  }
+  if (e.code === "Space" && !e.repeat) {
+    e.preventDefault(); // avoid page scroll / re-activating focused buttons
+    primaryAction();    // equivalent to a left click
+  }
+});
+
+// ---------- Presentation update ----------
+// Runs on wall-clock time, every frame, on every screen. Nothing here is
+// allowed to touch the simulation.
+function stepFx(dt: number) {
+  for (let i = centerFloaters.length - 1; i >= 0; i--) {
+    centerFloaters[i].age += dt;
+    if (centerFloaters[i].age > 1.0) centerFloaters.splice(i, 1);
+  }
+  for (let i = sparkles.length - 1; i >= 0; i--) {
+    const s = sparkles[i];
+    s.age += dt;
+    if (s.drag) {
+      const d = Math.max(0, 1 - s.drag * dt);
+      s.vx *= d; s.vy *= d;
+    }
+    if (s.grav) s.vy += s.grav * dt;
+    s.x += s.vx * dt;
+    s.y += s.vy * dt;
+    if (s.age > s.life) sparkles.splice(i, 1);
+  }
+  restartLock = Math.max(0, restartLock - dt);
+
+  // score counter rolls up smoothly (~0.25s per capture)
+  if (displayScore < run.score) {
+    displayScore = Math.min(run.score,
+      displayScore + Math.max(2500, (run.score - displayScore) * 4) * dt);
+  } else if (displayScore > run.score) {
+    displayScore = run.score;
+  }
+
+  // candle flames: continuous stream of rising, shrinking warm particles
+  if (flameEmit.length) {
+    flameAcc += dt * 130;
+    while (flameAcc >= 1) {
+      flameAcc -= 1;
+      for (const e of flameEmit) {
+        sparkles.push({
+          x: e.x + (Math.random() - 0.5) * 10 * flameScale,
+          y: e.y + (Math.random() - 0.5) * 6 * flameScale,
+          vx: (Math.random() - 0.5) * 14 * flameScale,
+          vy: -(45 + Math.random() * 60) * flameScale,
+          age: 0, life: 0.3 + Math.random() * 0.45,
+          size: (11 + Math.random() * 10) * flameScale,
+          color: FLAME_PALETTE[(Math.random() * FLAME_PALETTE.length) | 0],
+          drag: 0.6, grav: -80 * flameScale, // buoyant: accelerates upward
+        });
+      }
+    }
+  }
+
+  // needle sparkle trail: emitted per frame rather than per tick, so its
+  // density doesn't change with the simulation rate
+  if (phase === "playing" && !paused) {
+    for (let i = 0; i < 2; i++) {
+      const rr = R_DIAL * 0.3 + Math.random() * (R_WEDGE_OUT - R_DIAL * 0.3);
+      const jitter = (Math.random() - 0.5) * 0.05;
+      sparkles.push({
+        x: CX + Math.cos(run.angle + jitter) * rr,
+        y: CY - Math.sin(run.angle + jitter) * rr,
+        vx: (Math.random() - 0.5) * 20,
+        vy: (Math.random() - 0.5) * 20,
+        age: 0, life: 0.5,
+        size: 3.2, color: TRAIL_COLOR,
+        drag: 0, grav: 0,
+      });
+    }
+  }
+
+  sparkT += dt;
+  shockT += dt;
+
+  // shackle pries open on a win
+  const popTarget = (phase === "gameover" && run.won) ? 1 : 0;
+  shankPop += (popTarget - shankPop) * Math.min(1, dt * 6);
+
+  // slark idle blinking
+  slarkBlink = Math.max(0, slarkBlink - dt);
+  slarkReact = Math.max(0, slarkReact - dt);
+  slarkNext -= dt;
+  if (slarkNext <= 0) {
+    slarkBlink = 0.13;
+    slarkNext = 2 + Math.random() * 3;
+  }
+}
+
+// ---------- Simulation driver ----------
+// The sim only ever advances in whole fixed ticks, so the game plays identically
+// at 60Hz and 144Hz and a recorded run replays exactly. Wall-clock time decides
+// how many ticks to run and nothing else.
+const MAX_CATCHUP = 0.25;     // seconds of simulation per frame: a longer stall
+                              // (tab switch, GC pause) is dropped rather than
+                              // fast-forwarded through
+
+function stepSim(wall: number) {
+  syncBoost();
+  acc += Math.min(wall, MAX_CATCHUP);
+  while (acc >= DT) {
+    acc -= DT;
+    // inputs land on a tick boundary and are stamped with that tick, so the
+    // replay applies them at exactly the same moment
+    for (let i = 0; i < pending.length; i++) {
+      trace.push({ t: run.tick, a: pending[i] });
+      applyInput(run, pending[i]);
+    }
+    pending.length = 0;
+    step(run);
+    handleEvents(drain(run));
+    if (run.over) { finishRun(); return; }
+  }
+}
+
+// Sim events become sound and particles here. This is the only direction
+// information is allowed to flow.
+function handleEvents(events: SimEvent[]) {
+  for (const e of events) {
+    if (e.k === "capture") {
+      playSfx("success", 0.6);
+      spawnBurst(e.angle, e.color);
+      slarkReact = 0.35;
+    } else if (e.k === "bonus") {
+      centerFloaters.push({ text: "+" + e.amount.toFixed(1), age: 0 });
+    } else if (e.k === "miss") {
+      playSfx("miss", 0.6);
+      spawnMissBurst(e.angle);
+      shockT = 0;
+    }
+  }
+}
+
+function finishRun() {
+  phase = "gameover";
+  acc = 0;
+  pending.length = 0;
+  best = Math.max(best, run.score);
+  try { localStorage.setItem("lockpick_best", String(best)); } catch (e) {}
+  restartLock = 2; // ignore stray clicks right after the game ends (R still works)
+  stopMusic();
+  playFile(run.won ? WIN_STINGER
+                   : LOSE_STINGERS[(Math.random() * LOSE_STINGERS.length) | 0], 0.5);
+  const vo = run.won ? WIN_VO : LOSE_VO;
+  setTimeout(() => playFile(vo[(Math.random() * vo.length) | 0], 0.7), 600);
+  archiveRun();
+}
+
+// Re-simulate the run that just finished, from its seed and recorded inputs
+// only, and check it lands on the same score. Nothing in the game depends on
+// this, but it continuously proves the property a leaderboard would rest on —
+// that a run is reproducible from seed + trace alone — so a change that quietly
+// breaks determinism shows up here on the very next run instead of much later.
+function archiveRun() {
+  const result = summary(run);
+  lastRun = { seed: run.seed, inputs: encodeInputs(trace), result, verified: false };
+  try {
+    const replay = simulate(lastRun.seed, lastRun.inputs);
+    lastRun.verified = sameResult(result, replay);
+    if (!lastRun.verified) {
+      console.error("[pickthelock] replay diverged from the live run",
+                    { live: result, replay });
+    }
+  } catch (err) {
+    console.error("[pickthelock] replay failed", err);
+  }
+}
+
+// Automation handle, used by the browser-side determinism test. Exposing it
+// costs nothing: the leaderboard's threat model already assumes the player
+// controls the client completely, which is the whole reason runs are verified
+// server-side from the seed and inputs rather than trusted from a score.
+(window as any).__lockpick = {
+  ENGINE,
+  get phase() { return phase; },
+  get run() { return run; },
+  get lastRun() { return lastRun; },
+  start: startRun,
+  pick: () => queueInput(PICK),
+};
+
+// ---------- Three.js scene ----------
+const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true });
+renderer.toneMapping = THREE.NoToneMapping;
+renderer.outputColorSpace = THREE.LinearSRGBColorSpace; // raw pass-through, no brightening
+const scene = new THREE.Scene();
+// pixel-space orthographic camera, y pointing down like Canvas 2D
+const camera = new THREE.OrthographicCamera(0, 1, 0, 1, -1000, 1000);
+
+const unitPlane = new THREE.PlaneGeometry(1, 1);
+function spriteMesh(tex: THREE.Texture, order: number): Sprite {
+  const m = new THREE.Mesh(unitPlane, new THREE.MeshBasicMaterial({
+    map: tex, transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+  }));
+  m.renderOrder = order;
+  scene.add(m);
+  return m;
+}
+
+type Sprite = THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+type ShaderQuad = THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>;
+let backdropMesh: Sprite, bgMesh: Sprite, slarkMesh: Sprite, armMesh: Sprite,
+    shankMesh: Sprite, lockMesh: Sprite, dialMesh: Sprite;
+let flameHalo1: Sprite, flameHalo2: Sprite, flameCore1: Sprite, flameCore2: Sprite;
+let flameEmit: { x: number; y: number }[] = [], flameScale = 1, flameAcc = 0; // candle particle emitters
+let wedgeMeshes: ShaderQuad[] = [];
+let needleMesh: ShaderQuad, tipMesh: Sprite, sparkMesh: Sprite,
+    points: THREE.Points<THREE.BufferGeometry, THREE.ShaderMaterial>,
+    pointsGeom: THREE.BufferGeometry;
+const MAX_PARTICLES = 800;
+
+const WEDGE_COLORS = {
+  yellow: { c0: hexRGB("#97731c"), c1: hexRGB("#f0bc2e"), c2: hexRGB("#ffe98a") },
+  blue:   { c0: hexRGB("#28568e"), c1: hexRGB("#4296ec"), c2: hexRGB("#8ed3ff") },
+};
+
+const wedgeShader = {
+  vertexShader: /* glsl */`
+    varying vec2 vLocal;
+    void main() {
+      vLocal = position.xy; // [-1,1] quad, y up in local space
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`,
+  fragmentShader: /* glsl */`
+    uniform float uCenter, uHalf, uRIn, uROut, uLockSize, uBright;
+    uniform vec2 uLockC;
+    uniform vec3 uC0, uC1, uC2;
+    uniform sampler2D uLockTex;
+    varying vec2 vLocal;
+    const float PI = 3.14159265359;
+    void main() {
+      float r = length(vLocal);
+      if (r > 1.0 || r < uRIn) discard;
+      // math-convention angle: local +y renders DOWN on screen (y-down
+      // camera), so negate y to match the game's y-up angle convention
+      float ang = atan(-vLocal.y, vLocal.x);
+      float d = abs(mod(ang - uCenter + PI, 2.0 * PI) - PI);
+      if (d > uHalf) discard;
+      // three-stop radial gradient (matches the canvas version's stops)
+      float t = clamp((r - uRIn) / (1.0 - uRIn), 0.0, 1.0);
+      vec3 col = t < 0.55 ? mix(uC0, uC1, t / 0.55)
+                          : mix(uC1, uC2, (t - 0.55) / 0.45);
+      // lock face scratches composited in (grayscale, brightness 4, contrast 1.8,
+      // overlay blend) so the wedge reads as a tinted overlay on the metal
+      vec2 world = vLocal * uROut; // local +y is already screen/image down
+      vec2 uv = (world + uLockC * uLockSize) / uLockSize;
+      vec3 tex = texture2D(uLockTex, uv).rgb; // flipY=false: uv.y from image top
+      float lum = dot(tex, vec3(0.299, 0.587, 0.114));
+      lum = clamp((lum * 4.0 - 0.5) * 1.8 + 0.5, 0.0, 1.0);
+      vec3 ov = mix(2.0 * col * lum,
+                    1.0 - 2.0 * (1.0 - col) * (1.0 - lum),
+                    step(0.5, lum));
+      col = mix(col, ov, 0.75);
+      gl_FragColor = vec4(col * uBright, 1.0);
+    }`,
+};
+
+const needleShader = {
+  vertexShader: /* glsl */`
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`,
+  fragmentShader: /* glsl */`
+    uniform vec3 uCore, uGlow;
+    uniform float uGlowK;
+    varying vec2 vUv;
+    void main() {
+      float t = vUv.x;                       // along the needle, hub -> tip
+      float d = abs(vUv.y * 2.0 - 1.0);      // distance from the centerline
+      float lenA = smoothstep(0.04, 0.4, t); // fade in away from the hub
+      float core = smoothstep(0.16, 0.0, d) * (0.45 + 0.55 * t);
+      float glow = pow(max(0.0, 1.0 - d), 2.0) * uGlowK * (0.3 + 0.7 * t);
+      vec3 col = uCore * core + uGlow * glow;
+      gl_FragColor = vec4(col * lenA, 1.0);  // additive: black adds nothing
+    }`,
+};
+
+const NEEDLE_COLORS = {
+  normal:    { core: hexRGB("#f2efff"), glow: hexRGB("#5a3cff"), k: 0.55, w: 20, tip: hexRGB("#ffffff") },
+  penalized: { core: hexRGB("#ff6a48"), glow: hexRGB("#d61c0a"), k: 1.15, w: 34, tip: hexRGB("#ff5030") },
+};
+
+const pointShader = {
+  vertexShader: /* glsl */`
+    attribute float aSize;
+    attribute float aAlpha;
+    attribute vec3 aColor;
+    varying vec3 vColor;
+    varying float vAlpha;
+    uniform float uDpr;
+    void main() {
+      vColor = aColor;
+      vAlpha = aAlpha;
+      gl_PointSize = aSize * uDpr;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`,
+  fragmentShader: /* glsl */`
+    varying vec3 vColor;
+    varying float vAlpha;
+    void main() {
+      float d = length(gl_PointCoord - 0.5);
+      float a = vAlpha * smoothstep(0.5, 0.12, d);
+      float core = vAlpha * smoothstep(0.16, 0.0, d); // white-hot center
+      gl_FragColor = vec4(vColor * a + vec3(1.0) * core * 0.85, a);
+    }`,
+};
+
+function buildScene() {
+  // dimmed, magnified copy of the stage scene filling the whole viewport
+  const backdropTex = TEX.bg.clone();
+  backdropTex.needsUpdate = true;
+  backdropMesh = spriteMesh(backdropTex, -1);
+  backdropMesh.material.transparent = false;
+  backdropMesh.material.color.setScalar(0.22);
+  // stage bg samples only the top of the image via texture repeat, so it is
+  // exactly stage-sized with no overflow (no bars needed to mask it)
+  const stageTex = TEX.bg.clone();
+  stageTex.needsUpdate = true;
+  bgMesh = spriteMesh(stageTex, 0);
+  bgMesh.material.transparent = false;
+
+  // candle flames: warm glow halos; the flame body is a stream of rising
+  // additive particles emitted in stepFx()
+  flameHalo1 = spriteMesh(TEX.glow, 2);
+  flameHalo1.material.blending = THREE.AdditiveBlending;
+  flameHalo1.material.color.setRGB(1.0, 0.55, 0.2);
+  flameHalo2 = spriteMesh(TEX.glow, 2);
+  flameHalo2.material.blending = THREE.AdditiveBlending;
+  flameHalo2.material.color.setRGB(1.0, 0.55, 0.2);
+  // white-hot vertical cores, the visible flame bodies
+  flameCore1 = spriteMesh(TEX.glow, 3);
+  flameCore1.material.blending = THREE.AdditiveBlending;
+  flameCore1.material.color.setRGB(1.0, 0.9, 0.62);
+  flameCore2 = spriteMesh(TEX.glow, 3);
+  flameCore2.material.blending = THREE.AdditiveBlending;
+  flameCore2.material.color.setRGB(1.0, 0.9, 0.62);
+  slarkMesh = spriteMesh(TEX.slark, 10);
+  armMesh = spriteMesh(TEX.arm, 8); // behind slark: the sleeve tucks under his body
+  TEX.slark.repeat.set(1 / SLARK_COLS, 1 / SLARK_ROWS);
+  shankMesh = spriteMesh(TEX.shank, 20);
+  lockMesh = spriteMesh(TEX.lock, 30);
+
+  for (let i = 0; i < MAX_ARCS; i++) {
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uCenter: { value: 0 }, uHalf: { value: 0 },
+        uRIn: { value: 0.6 }, uROut: { value: 100 },
+        uLockSize: { value: 100 }, uLockC: { value: new THREE.Vector2(LOCK_CX_FRAC, LOCK_CY_FRAC) },
+        uC0: { value: new THREE.Vector3() }, uC1: { value: new THREE.Vector3() },
+        uC2: { value: new THREE.Vector3() }, uBright: { value: 1 },
+        uLockTex: { value: TEX.lock },
+      },
+      vertexShader: wedgeShader.vertexShader,
+      fragmentShader: wedgeShader.fragmentShader,
+      transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+    });
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+    m.renderOrder = 40;
+    m.visible = false;
+    scene.add(m);
+    wedgeMeshes.push(m);
+  }
+
+  // particles between wedges and needle
+  pointsGeom = new THREE.BufferGeometry();
+  pointsGeom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(MAX_PARTICLES * 3), 3));
+  pointsGeom.setAttribute("aColor", new THREE.BufferAttribute(new Float32Array(MAX_PARTICLES * 3), 3));
+  pointsGeom.setAttribute("aSize", new THREE.BufferAttribute(new Float32Array(MAX_PARTICLES), 1));
+  pointsGeom.setAttribute("aAlpha", new THREE.BufferAttribute(new Float32Array(MAX_PARTICLES), 1));
+  points = new THREE.Points(pointsGeom, new THREE.ShaderMaterial({
+    uniforms: { uDpr: { value: 1 } },
+    vertexShader: pointShader.vertexShader,
+    fragmentShader: pointShader.fragmentShader,
+    transparent: true, depthTest: false, depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  }));
+  points.renderOrder = 45;
+  points.frustumCulled = false;
+  scene.add(points);
+
+  // needle: unit quad anchored at its inner end
+  const ng = new THREE.PlaneGeometry(1, 1);
+  ng.translate(0.5, 0, 0);
+  needleMesh = new THREE.Mesh(ng, new THREE.ShaderMaterial({
+    uniforms: {
+      uCore: { value: new THREE.Vector3(...NEEDLE_COLORS.normal.core) },
+      uGlow: { value: new THREE.Vector3(...NEEDLE_COLORS.normal.glow) },
+      uGlowK: { value: NEEDLE_COLORS.normal.k },
+    },
+    vertexShader: needleShader.vertexShader,
+    fragmentShader: needleShader.fragmentShader,
+    transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+  }));
+  needleMesh.renderOrder = 50;
+  scene.add(needleMesh);
+
+  tipMesh = new THREE.Mesh(unitPlane, new THREE.MeshBasicMaterial({
+    map: TEX.glow, color: new THREE.Color(...NEEDLE_COLORS.normal.tip),
+    transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+  }));
+  tipMesh.renderOrder = 51;
+  tipMesh.material.blending = THREE.AdditiveBlending;
+  scene.add(tipMesh);
+
+  // spark flash: the game's own flare sprite (yellowflare2, additive)
+  sparkMesh = new THREE.Mesh(unitPlane, new THREE.MeshBasicMaterial({
+    map: TEX.flare, transparent: true, depthTest: false, depthWrite: false,
+    side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+  }));
+  sparkMesh.renderOrder = 55;
+  sparkMesh.visible = false;
+  scene.add(sparkMesh);
+
+  dialMesh = spriteMesh(TEX.dial, 60);
+}
+
+// ---------- Sizing ----------
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth;
+  H = window.innerHeight;
+
+  renderer.setPixelRatio(dpr);
+  renderer.setSize(W, H); // also sets canvas CSS size — critical on high-DPR screens
+  camera.left = 0; camera.right = W;
+  camera.top = 0; camera.bottom = H;
+  camera.updateProjectionMatrix();
+
+  const uiCanvas = ui.canvas;
+  uiCanvas.width = W * dpr;
+  uiCanvas.height = H * dpr;
+  uiCanvas.style.width = W + "px";
+  uiCanvas.style.height = H + "px";
+  ui.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  SH = Math.min(H, W / STAGE_ASPECT);
+  SW = SH * STAGE_ASPECT;
+  SX = (W - SW) / 2;
+  SY = (H - SH) / 2;
+  R_LOCK = SW * 0.31;                     // drawn radius of the lock face (matches popup)
+  R_HOLE = R_LOCK * HOLE_FRAC;
+  R_WEDGE_OUT = R_HOLE * 0.99;
+  R_DIAL = R_HOLE * 0.62;
+  R_WEDGE_IN = R_DIAL * 1.01;
+  CX = SX + SW / 2;
+  CY = SY + SH * 0.675;                   // lock low in the stage; sign and slark above
+  BTN_R = Math.max(22, SW * 0.045);       // buttons scale with the stage,
+  BTN_PAD = BTN_R * 0.62;                 // floored at a comfortable tap size
+
+  if (assetsReady) layout();
+}
+
+function layout() {
+  const bt = TEX.bg.image as HTMLImageElement;
+  // stage bg: cover-crop of the image, horizontally centered and top-anchored
+  // (the window stays put; excess floor or side wall is cropped)
+  const cs = Math.max(SW / bt.width, SH / bt.height);
+  const fx = SW / (bt.width * cs), fy = SH / (bt.height * cs);
+  const stageMap = bgMesh.material.map!;
+  stageMap.repeat.set(fx, fy);
+  stageMap.offset.set((1 - fx) / 2, 0);
+  bgMesh.scale.set(SW, SH, 1);
+  bgMesh.position.set(CX, SY + SH / 2, 0);
+
+  // dimmed backdrop: a magnified copy of the stage's own crop, centered on
+  // the stage, so every letterbox strip (top/bottom/sides) continues the
+  // visible scene instead of exposing the art's near-black extremities
+  const bk = Math.max(W / SW, H / SH) * 1.06;
+  const bMap = backdropMesh.material.map!;
+  bMap.repeat.copy(stageMap.repeat);
+  bMap.offset.copy(stageMap.offset);
+  backdropMesh.scale.set(SW * bk, SH * bk, 1);
+  backdropMesh.position.set(CX, SY + SH / 2, 0);
+
+  // candle flames anchored over the painted candles in the bg art
+  // flame anchors user-calibrated via #calibrate mode (plus manual nudges):
+  // left (163,393), right (1050,286) in the 1200x1600 art
+  const fw = 210 * cs;
+  flameHalo1.scale.set(fw, fw, 1);
+  flameHalo1.position.set(CX + (163 - 600) * cs, SY + 399 * cs, 0);
+  flameHalo2.scale.set(fw, fw, 1);
+  flameHalo2.position.set(CX + (1050 - 600) * cs, SY + 292 * cs, 0);
+  flameCore1.scale.set(72 * cs, 130 * cs, 1);
+  flameCore1.position.set(CX + (163 - 600) * cs, SY + 393 * cs, 0);
+  flameCore2.scale.set(72 * cs, 130 * cs, 1);
+  flameCore2.position.set(CX + (1050 - 600) * cs, SY + 286 * cs, 0);
+  flameEmit = [
+    { x: CX + (163 - 600) * cs, y: SY + 417 * cs },
+    { x: CX + (1050 - 600) * cs, y: SY + 310 * cs },
+  ];
+  flameScale = cs;
+
+  // slark is anchored in background-image coordinates so he stays in the
+  // prison window whatever the stage aspect (head 460px wide, chin at
+  // y=560 in the 1200x1600 art — sized/raised to match the live game,
+  // where he sits back in the window above the shackle)
+  const headW = 295 * cs; // ~2/3, matches the in-game proportion
+  const headH = headW * (500 / 420);
+  slarkMesh.scale.set(headW, headH, 1);
+  slarkRestY = SY + 560 * cs - headH / 2;
+  slarkMesh.position.set(CX, slarkRestY, 0);
+
+  // his arm holding the pick, poking over the sill left of the lock; the
+  // art's shoulder pivot dot sits at the frame center, so rotating the
+  // mesh wiggles the pick naturally (anchored in bg-image coords)
+  // sized/anchored relative to the head so it stays attached at any slark
+  // scale. Drawn behind him: the shoulder pivot hides under his hood and
+  // only the hand + pick emerge beside his jaw, reaching to the sill
+  const armW = headW;
+  armMesh.scale.set(armW, armW, 1);
+  armRestY = SY + 560 * cs - headW * 0.15;
+  armMesh.position.set(CX - headW * 0.10, armRestY, 0);
+
+  const shW = R_LOCK * 1.5;
+  const shankImg = TEX.shank.image as HTMLImageElement;
+  const shH = shW * (shankImg.height / shankImg.width);
+  shankMesh.scale.set(shW, shH, 1);
+  shankBaseY = CY - R_LOCK * 0.55 - shH / 2;
+  shankMesh.position.set(CX, shankBaseY, 0);
+
+  const lockDrawW = R_LOCK / LOCK_R_FRAC;
+  lockMesh.scale.set(lockDrawW, lockDrawW, 1);
+  // lock face circle center sits at (CX, CY) -> offset the image accordingly
+  lockMesh.position.set(
+    CX + lockDrawW * (0.5 - LOCK_CX_FRAC),
+    CY + lockDrawW * (0.5 - LOCK_CY_FRAC), 0);
+
+  for (const m of wedgeMeshes) {
+    m.scale.set(R_WEDGE_OUT, R_WEDGE_OUT, 1);
+    m.position.set(CX, CY, 0);
+    m.material.uniforms.uRIn.value = R_WEDGE_IN / R_WEDGE_OUT;
+    m.material.uniforms.uROut.value = R_WEDGE_OUT;
+    m.material.uniforms.uLockSize.value = lockDrawW;
+  }
+
+  needleMesh.scale.set(R_WEDGE_OUT, NEEDLE_COLORS.normal.w, 1); // width per-state in syncScene
+  needleMesh.position.set(CX, CY, 0);
+  tipMesh.scale.set(26, 26, 1); // softglow sprite: bright core with a wide halo
+
+  dialMesh.scale.set(R_DIAL * 2, R_DIAL * 2, 1);
+  dialMesh.position.set(CX, CY, 0);
+}
+
+// ---------- Per-frame visual sync ----------
+function syncScene() {
+  // slark sprite frame: reaction wins over blink, else idle
+  const frame = slarkReact > 0 ? 2 : (slarkBlink > 0 ? 1 : 0);
+  const col = frame % SLARK_COLS, row = Math.floor(frame / SLARK_COLS);
+  TEX.slark.offset.set(col / SLARK_COLS, row / SLARK_ROWS); // flipY=false: v=0 is sheet top
+
+  // arm idle wiggle around the shoulder pivot, plus a quick jitter on capture
+  const tNow = performance.now() / 1000;
+  // shock from a miss: rapid judder that decays over ~0.22s
+  const shock = Math.max(0, 1 - shockT / 0.22);
+  armMesh.rotation.z = 0.5 + 0.08 * Math.sin(tNow * 1.7) + 0.18 * slarkReact * Math.sin(tNow * 22)
+                     + 0.14 * shock * Math.sin(tNow * 50);
+
+  // slark bobs gently in the window; the arm rides along with him.
+  // A miss makes him judder rapidly, and the whole scene shakes with him
+  const bob = Math.sin(tNow * 1.4) * SW * 0.005
+            + shock * SW * 0.009 * Math.sin(tNow * 58);
+  slarkMesh.position.y = slarkRestY + bob;
+  armMesh.position.y = armRestY + bob;
+  scene.position.x = shock * SW * 0.004 * Math.sin(tNow * 41 + 1);
+  scene.position.y = shock * SW * 0.006 * Math.sin(tNow * 47);
+
+  // candle halos + cores flicker gently, out of phase with each other
+  flameHalo1.material.opacity = 0.42 + 0.1 * Math.sin(tNow * 9.3) * Math.sin(tNow * 5.1);
+  flameHalo2.material.opacity = 0.42 + 0.1 * Math.sin(tNow * 8.1 + 2) * Math.sin(tNow * 4.7 + 1);
+  flameCore1.material.opacity = 0.85 + 0.12 * Math.sin(tNow * 11.7) * Math.sin(tNow * 6.3);
+  flameCore2.material.opacity = 0.85 + 0.12 * Math.sin(tNow * 10.9 + 1) * Math.sin(tNow * 5.9 + 2);
+  flameCore1.scale.y = 130 * flameScale * (1 + 0.07 * Math.sin(tNow * 13.1));
+  flameCore2.scale.y = 130 * flameScale * (1 + 0.07 * Math.sin(tNow * 12.3 + 1));
+
+  // shackle lifts and tilts open on a win
+  shankMesh.position.y = shankBaseY - shankPop * R_LOCK * 0.26;
+  shankMesh.rotation.z = shankPop * 0.18;
+
+  // wedges
+  for (let i = 0; i < wedgeMeshes.length; i++) {
+    const m = wedgeMeshes[i];
+    if (i < run.arcs.length) {
+      const a = run.arcs[i];
+      const cset = WEDGE_COLORS[a.color];
+      m.visible = true;
+      m.material.uniforms.uCenter.value = a.center;
+      m.material.uniforms.uHalf.value = a.half;
+      m.material.uniforms.uC0.value.set(...cset.c0);
+      m.material.uniforms.uC1.value.set(...cset.c1);
+      m.material.uniforms.uC2.value.set(...cset.c2);
+      // very bright when fresh, darkening as the wedge shrinks away;
+      // blue (time) wedges additionally pulsate their intensity. The pulse
+      // phase comes off the wedge id by the golden angle so neighbours stay out
+      // of step without the simulation spending randomness on decoration.
+      let bright = 0.65 + 0.8 * (a.half / WEDGE_HALF);
+      if (a.color === "blue") bright *= 1.08 + 0.2 * Math.sin(tNow * 5.5 + a.id * 2.39996);
+      m.material.uniforms.uBright.value = bright;
+    } else {
+      m.visible = false;
+    }
+  }
+
+  // needle (world y is down; rotation.z is negated to keep math convention)
+  needleMesh.rotation.z = -run.angle;
+  const nc = run.missState !== 0 ? NEEDLE_COLORS.penalized : NEEDLE_COLORS.normal;
+  needleMesh.material.uniforms.uCore.value.set(nc.core[0], nc.core[1], nc.core[2]);
+  needleMesh.material.uniforms.uGlow.value.set(nc.glow[0], nc.glow[1], nc.glow[2]);
+  needleMesh.material.uniforms.uGlowK.value = nc.k;
+  needleMesh.scale.y = nc.w;
+  tipMesh.position.set(CX + Math.cos(run.angle) * R_WEDGE_OUT,
+                       CY - Math.sin(run.angle) * R_WEDGE_OUT, 0);
+  tipMesh.material.color.setRGB(nc.tip[0], nc.tip[1], nc.tip[2]);
+
+  // brief spark star at the miss point, growing and fading
+  const SPARK_DUR = 0.28;
+  if (sparkT < SPARK_DUR) {
+    const k = sparkT / SPARK_DUR;
+    sparkMesh.visible = true;
+    sparkMesh.position.set(sparkX, sparkY, 0);
+    sparkMesh.rotation.z = sparkRot;
+    const scNow = R_LOCK * (0.32 + 0.28 * k);
+    sparkMesh.scale.set(scNow, scNow, 1);
+    sparkMesh.material.opacity = 1 - k;
+  } else {
+    sparkMesh.visible = false;
+  }
+
+  // particles
+  const pos = pointsGeom.attributes.position.array;
+  const colA = pointsGeom.attributes.aColor.array;
+  const sizeA = pointsGeom.attributes.aSize.array;
+  const alphaA = pointsGeom.attributes.aAlpha.array;
+  const n = Math.min(sparkles.length, MAX_PARTICLES);
+  for (let i = 0; i < n; i++) {
+    const s = sparkles[i];
+    const k = 1 - s.age / s.life;
+    pos[i * 3] = s.x; pos[i * 3 + 1] = s.y; pos[i * 3 + 2] = 0;
+    colA[i * 3] = s.color[0]; colA[i * 3 + 1] = s.color[1]; colA[i * 3 + 2] = s.color[2];
+    sizeA[i] = s.size * k + 1;
+    alphaA[i] = 0.8 * k;
+  }
+  pointsGeom.setDrawRange(0, n);
+  pointsGeom.attributes.position.needsUpdate = true;
+  pointsGeom.attributes.aColor.needsUpdate = true;
+  pointsGeom.attributes.aSize.needsUpdate = true;
+  pointsGeom.attributes.aAlpha.needsUpdate = true;
+  points.material.uniforms.uDpr.value = window.devicePixelRatio || 1;
+}
+
+// ---------- 2D UI layer ----------
+function smallCaps(text: string, x: number, y: number, sizePx: number, color: string, spacing: number) {
+  ui.font = `600 ${sizePx}px ${FONT}`;
+  ui.fillStyle = color;
+  const chars = text.split("");
+  let total = 0;
+  for (const c of chars) total += ui.measureText(c).width + spacing;
+  total -= spacing;
+  let cx = x - total / 2;
+  ui.textAlign = "left";
+  for (const c of chars) {
+    ui.fillText(c, cx, y);
+    cx += ui.measureText(c).width + spacing;
+  }
+  ui.textAlign = "center";
+}
+
+// metallic text fill: lighter on top, darker toward the bottom
+function vGradText(top: string, bottom: string, cy: number, sizePx: number): CanvasGradient {
+  const g = ui.createLinearGradient(0, cy - sizePx * 0.5, 0, cy + sizePx * 0.5);
+  g.addColorStop(0, top);
+  g.addColorStop(1, bottom);
+  return g;
+}
+
+function drawSign() {
+  const signW = SW * 0.40; // matches the live game's sign-to-stage ratio
+  const signH = signW * (signImg.height / signImg.width);
+  const signY = SY - signH * 0.06; // chains run off the top of the stage
+  // very subtle horizontal drift on its chains (no rotation, no bob)
+  const sway = SW * 0.003 * Math.sin(performance.now() / 1000 * 0.8);
+  ui.save();
+  ui.translate(CX + sway, signY);
+  ui.drawImage(signImg, -signW / 2, 0, signW, signH);
+  ui.textAlign = "center";
+  ui.textBaseline = "middle";
+  const titleSize = Math.round(signW * 0.085);
+  ui.font = `700 ${titleSize}px ${FONT}`;
+  // inverted metal: darker on top, brighter toward the bottom
+  ui.fillStyle = vGradText("#a8925f", "#f4e6c0", signH * 0.70, titleSize);
+  ui.shadowColor = "#000";
+  ui.shadowBlur = 6;
+  ui.fillText("PICK THE LOCK", 0, signH * 0.70);
+  ui.shadowBlur = 0;
+  ui.restore();
+}
+
+function drawUI() {
+  ui.clearRect(0, 0, W, H);
+
+  if (!assetsReady) {
+    ui.fillStyle = "#8d8578";
+    ui.font = `500 16px ${FONT}`;
+    ui.textAlign = "center";
+    ui.textBaseline = "middle";
+    ui.fillText("Loading…", W / 2, H / 2);
+    return;
+  }
+
+  drawSign();
+
+  // center text: +bonus / TIME REMAINING / time / SCORE / score
+  if (phase !== "menu") {
+    // the dial text shakes with the scene during the miss shock
+    const uiT = performance.now() / 1000;
+    const uiShock = Math.max(0, 1 - shockT / 0.22);
+    ui.save();
+    ui.translate(uiShock * SW * 0.004 * Math.sin(uiT * 41 + 1),
+                 uiShock * SW * 0.006 * Math.sin(uiT * 47) - R_DIAL * 0.07);
+    ui.textAlign = "center";
+    ui.textBaseline = "middle";
+
+    for (const f of centerFloaters) {
+      const k = f.age / 1.0;
+      const fy = CY - R_DIAL * 0.52 - k * 14;
+      const fSize = Math.round(R_DIAL * 0.2);
+      ui.globalAlpha = 1 - k;
+      ui.font = `600 ${fSize}px ${FONT_NUM}`;
+      ui.fillStyle = vGradText("#f4e6c0", "#a8925f", fy, fSize); // matches the timer
+      ui.fillText(f.text, CX, fy);
+      ui.globalAlpha = 1;
+    }
+
+    smallCaps("TIME REMAINING", CX, CY - R_DIAL * 0.26, Math.round(R_DIAL * 0.11), "#b59a63", 2);
+
+    const timerTop = "#f4e6c0", timerBot = "#a8925f"; // warm golden metal, always
+    const tSize = Math.round(R_DIAL * 0.5);
+    ui.font = `600 ${tSize}px ${FONT_NUM}`;
+    ui.fillStyle = vGradText(timerTop, timerBot, CY + R_DIAL * 0.06, tSize);
+    ui.fillText(run.timeLeft.toFixed(1), CX, CY + R_DIAL * 0.06);
+
+    smallCaps("SCORE", CX, CY + R_DIAL * 0.42, Math.round(R_DIAL * 0.11), "#b59a63", 2);
+    const sSize = Math.round(R_DIAL * 0.22);
+    ui.font = `600 ${sSize}px ${FONT_NUM}`;
+    ui.fillStyle = vGradText("#eeda9f", "#8b8cc4", CY + R_DIAL * 0.66, sSize); // gold into blue-purple
+    ui.fillText(Math.round(displayScore).toLocaleString(), CX, CY + R_DIAL * 0.66);
+    ui.restore();
+  }
+
+  // brief red wash over the stage while the miss shock lasts
+  const shockK = Math.max(0, 1 - shockT / 0.22);
+  if (shockK > 0) {
+    ui.fillStyle = `rgba(210, 36, 22, ${(0.22 * shockK).toFixed(3)})`;
+    ui.fillRect(SX, SY, SW, SH);
+  }
+
+  // overlays
+  if (phase === "menu") {
+    drawMenuOverlay();
+  } else if (phase === "playing" && paused) {
+    ui.fillStyle = "rgba(8,7,9,0.6)";
+    ui.fillRect(0, 0, W, H);
+    ui.textAlign = "center";
+    ui.textBaseline = "middle";
+    const pSize = Math.round(R_LOCK * 0.16);
+    ui.font = `700 ${pSize}px ${FONT}`;
+    ui.fillStyle = vGradText("#f4e6c0", "#a8925f", CY - R_LOCK * 0.1, pSize);
+    ui.fillText("PAUSED", CX, CY - R_LOCK * 0.1);
+    ui.font = `500 ${Math.round(R_LOCK * 0.07)}px ${FONT}`;
+    ui.fillStyle = "#cfc4a6";
+    ui.fillText("Press P to resume", CX, CY + R_LOCK * 0.08);
+  } else if (phase === "gameover") {
+    drawOverlayText(
+      (run.won ? "Unlocked! " : "The lock holds\u2026 ") + "Final score: " + run.score.toLocaleString(),
+      best > 0 ? "Best: " + best.toLocaleString() : "",
+      restartLock > 0 ? "" : "Click or press R to play again");
+  }
+
+  drawButtons();
+
+  // disclaimer, always at the stage bottom
+  ui.textAlign = "center";
+  ui.textBaseline = "middle";
+  ui.font = `500 ${Math.max(7, Math.min(12, Math.round(SW * 0.016)))}px ${FONT}`;
+  ui.fillStyle = "rgba(200,190,170,0.5)";
+  ui.fillText("Fan recreation • Dota 2 art & audio © Valve Corporation • not affiliated with Valve",
+              CX, SY + SH - 12);
+}
+
+function drawRoundBtn(pos: { x: number; y: number }, glyph: string, active: boolean) {
+  ui.beginPath();
+  ui.arc(pos.x, pos.y, BTN_R, 0, TAU);
+  ui.fillStyle = active ? "rgba(201,169,79,0.92)" : "rgba(18,15,13,0.8)";
+  ui.fill();
+  ui.lineWidth = 2;
+  ui.strokeStyle = active ? "#ffe98a" : "#c9a94f";
+  ui.stroke();
+  ui.fillStyle = active ? "#1a1410" : "#d9c18a";
+  ui.font = "700 " + Math.round(BTN_R * (glyph.length > 1 ? 0.62 : 1.05)) + "px " + FONT;
+  ui.textAlign = "center";
+  ui.textBaseline = "middle";
+  ui.fillText(glyph, pos.x, pos.y + 1);
+}
+function drawButtons() {
+  const b = buttonRects();
+  drawRoundBtn(b.restart, "\u21bb", false);      // restart
+  drawRoundBtn(b.boost, "\u00bb", boostLocked);  // boost lock
+  drawRoundBtn(b.music, "\u266a", musicOn);      // music + voice lines
+  drawRoundBtn(b.sfx, "FX", sfxOn);               // sound effects
+  for (const [pos, on] of [[b.music, musicOn], [b.sfx, sfxOn]] as [{ x: number; y: number }, boolean][]) {
+    if (on) continue;
+    ui.strokeStyle = "#c9a94f";
+    ui.lineWidth = 3;
+    ui.beginPath();
+    ui.moveTo(pos.x - BTN_R * 0.55, pos.y + BTN_R * 0.55);
+    ui.lineTo(pos.x + BTN_R * 0.55, pos.y - BTN_R * 0.55);
+    ui.stroke();
+  }
+
+  const labelFs = Math.max(9, Math.round(BTN_R * 0.38));
+  if (IS_TOUCH) {
+    // touch devices: persistent labels beside the action buttons
+    ui.font = `600 ${labelFs}px ${FONT}`;
+    ui.fillStyle = "rgba(217,193,138,0.75)";
+    ui.textBaseline = "middle";
+    ui.textAlign = "left";
+    ui.fillText("RESTART", b.restart.x + BTN_R + 8, b.restart.y);
+    ui.textAlign = "right";
+    ui.fillText("TOGGLE BOOST", b.boost.x - BTN_R - 8, b.boost.y);
+    ui.textAlign = "center";
+  } else if (hoverBtn === "restart" || hoverBtn === "boost") {
+    // desktop: tooltip above the hovered button
+    const pos = b[hoverBtn];
+    const text = hoverBtn === "restart" ? "Restart (R)" : "TOGGLE BOOST (T)";
+    ui.font = `500 ${labelFs}px ${FONT}`;
+    const tw = ui.measureText(text).width;
+    const tipX = Math.min(Math.max(pos.x, SX + tw / 2 + 10), SX + SW - tw / 2 - 10);
+    const tipY = pos.y - BTN_R - 16;
+    ui.fillStyle = "rgba(10,8,6,0.9)";
+    ui.beginPath();
+    ui.roundRect(tipX - tw / 2 - 8, tipY - labelFs, tw + 16, labelFs * 2, 5);
+    ui.fill();
+    ui.strokeStyle = "rgba(201,169,79,0.5)";
+    ui.lineWidth = 1;
+    ui.stroke();
+    ui.fillStyle = "#d9c18a";
+    ui.textAlign = "center";
+    ui.textBaseline = "middle";
+    ui.fillText(text, tipX, tipY);
+  }
+}
+
+type MenuIcon = { type: "mouse"; side: "L" | "R" } | { type: "key"; label: string };
+
+function drawMouseIcon(x: number, y: number, side: "L" | "R", sz: number) {
+  const w = sz * 1.2, h = sz * 1.8;
+  ui.save();
+  ui.translate(x, y);
+  ui.fillStyle = "#45413a";
+  ui.beginPath();
+  ui.roundRect(-w / 2, -h / 2, w, h, w * 0.45);
+  ui.fill();
+  // highlighted button half
+  ui.fillStyle = "#e8ddc0";
+  ui.beginPath();
+  if (side === "L") ui.roundRect(-w / 2, -h / 2, w / 2 - 1, h * 0.45, [w * 0.45, 2, 2, 2]);
+  else ui.roundRect(1, -h / 2, w / 2 - 1, h * 0.45, [2, w * 0.45, 2, 2]);
+  ui.fill();
+  ui.restore();
+}
+
+function drawKeyIcon(x: number, y: number, label: string, sz: number) {
+  const wide = label.length > 1;
+  const w = wide ? sz * 2.8 : sz * 1.5;
+  const h = sz * 1.25;
+  ui.save();
+  ui.translate(x, y);
+  ui.fillStyle = "#45413a";
+  ui.beginPath();
+  ui.roundRect(-w / 2, -h / 2, w, h, 3);
+  ui.fill();
+  ui.strokeStyle = "rgba(232,221,192,0.5)";
+  ui.lineWidth = 1;
+  ui.stroke();
+  ui.fillStyle = "#e8ddc0";
+  ui.font = `600 ${Math.round(sz * (wide ? 0.55 : 0.75))}px ${FONT}`;
+  ui.textAlign = "center";
+  ui.textBaseline = "middle";
+  ui.fillText(label, 0, 1);
+  ui.restore();
+}
+
+function drawIconStack(x: number, centerY: number, icons: MenuIcon[], fs: number) {
+  const hs = icons.map(ic => (ic.type === "mouse" ? fs * 1.8 : fs * 1.25));
+  const gap = fs * 0.5;
+  const total = hs.reduce((a, b) => a + b, 0) + gap * (icons.length - 1);
+  let cy = centerY - total / 2;
+  icons.forEach((ic, i) => {
+    const c = cy + hs[i] / 2;
+    if (ic.type === "mouse") drawMouseIcon(x, c, ic.side, fs);
+    else drawKeyIcon(x, c, ic.label, fs);
+    cy += hs[i] + gap;
+  });
+}
+
+function drawMenuOverlay() {
+  ui.fillStyle = "rgba(8,7,9,0.62)";
+  ui.fillRect(0, 0, W, H);
+  drawSign();
+
+  const fs = Math.max(11, Math.round(SW * 0.024));
+  const lh = fs * 1.4;
+  const bx = CX - SW * 0.29;   // left edge of the text block
+  const ix = bx + fs * 0.7;    // icon gutter center
+  const tx = bx + fs * 2.4;    // text indent
+  let y = SY + SH * 0.26;
+
+  ui.textAlign = "left";
+  ui.textBaseline = "middle";
+  ui.fillStyle = "#cfc4a6";
+  ui.font = `500 ${fs}px ${FONT}`;
+  ui.fillText("Successfully pick the lock as many times", bx, y); y += lh;
+  ui.fillText("as you can before time runs out.", bx, y); y += lh * 1.8;
+
+  // one section = an icon stack vertically centered against its text block
+  const section = (icons: MenuIcon[], title: string, lines: string[]) => {
+    const rows = 1 + lines.length;
+    drawIconStack(ix, y + ((rows - 1) * lh) / 2, icons, fs);
+    ui.textAlign = "left";
+    ui.textBaseline = "middle";
+    ui.fillStyle = "#d9c18a";
+    ui.font = `700 ${fs}px ${FONT}`;
+    ui.fillText(title, tx, y); y += lh;
+    ui.fillStyle = "#cfc4a6";
+    ui.font = `500 ${fs}px ${FONT}`;
+    for (const line of lines) { ui.fillText(line, tx, y); y += lh; }
+    y += lh * 0.9;
+  };
+
+  section([{ type: "mouse", side: "L" }, { type: "key", label: "SPACE" }], "PICK", [
+    "Activate the lock pick when it",
+    "reaches the highlighted bar.",
+    "Missing the bar briefly disables the pick.",
+    "Blue bars grant additional time.",
+  ]);
+  section([{ type: "mouse", side: "R" }, { type: "key", label: "S" }],
+    "SPEED BOOST (HOLD)", ["Hold for continuous speed boost."]);
+  section([{ type: "key", label: "T" }],
+    "SPEED BOOST (TOGGLE)", ["Toggle continuous speed boost."]);
+  section([{ type: "key", label: "R" }],
+    "RESTART", ["Restart the run at any time."]);
+  section([{ type: "key", label: "P" }],
+    "PAUSE", ["Pause and resume the run."]);
+
+  if (best > 0) {
+    // personal best above the CTA (letters fall back to Radiance, digits
+    // render in RadianceM via the font stack)
+    ui.textAlign = "center";
+    ui.textBaseline = "middle";
+    const bSize = Math.round(SW * 0.026);
+    ui.font = `600 ${bSize}px ${FONT_NUM}`;
+    ui.fillStyle = vGradText("#eeda9f", "#8b8cc4", SY + SH * 0.85, bSize);
+    ui.fillText("BEST  " + best.toLocaleString(), CX, SY + SH * 0.85);
+  }
+
+  const blink = 0.6 + 0.4 * Math.sin(performance.now() / 300);
+  ui.globalAlpha = blink;
+  ui.textAlign = "center";
+  ui.font = `700 ${Math.round(R_LOCK * 0.09)}px ${FONT}`;
+  ui.fillStyle = "#ffe98a";
+  ui.fillText("Click to start", CX, SY + SH * 0.90);
+  ui.globalAlpha = 1;
+}
+
+function drawOverlayText(line1: string, line2: string, cta: string) {
+  ui.fillStyle = "rgba(8,7,9,0.55)";
+  ui.fillRect(0, 0, W, H);
+  drawSign(); // keep the title bright above the dim layer
+
+  ui.textAlign = "center";
+  ui.textBaseline = "middle";
+  ui.font = `500 ${Math.round(R_LOCK * 0.07)}px ${FONT}`;
+  ui.fillStyle = "#cfc4a6";
+  if (line1) ui.fillText(line1, CX, CY - R_LOCK * 0.15);
+  if (line2) ui.fillText(line2, CX, CY);
+  if (cta) {
+    const blink = 0.6 + 0.4 * Math.sin(performance.now() / 300);
+    ui.globalAlpha = blink;
+    ui.font = `700 ${Math.round(R_LOCK * 0.09)}px ${FONT}`;
+    ui.fillStyle = "#ffe98a";
+    ui.fillText(cta, CX, CY + R_LOCK * 0.3);
+    ui.globalAlpha = 1;
+  }
+}
+
+// ---------- Boot ----------
+const loader = new THREE.TextureLoader();
+async function loadAssets() {
+  // Radiance (UI) and RadianceM (digits) from the game files; if they fail
+  // to load we silently fall back to Georgia
+  try {
+    const faces = [
+      new FontFace("Radiance", 'url("assets/fonts/radiance-semibold.otf")', { weight: "100 900" }),
+      new FontFace("RadianceM", 'url("assets/fonts/radiancem-semibold.otf")', { weight: "100 900" }),
+    ];
+    await Promise.all(faces.map(f => f.load()));
+    faces.forEach(f => document.fonts.add(f));
+  } catch (e) {}
+
+  const entries = Object.entries(TEX_NAMES);
+  const texes = await Promise.all(entries.map(([k, src]) => loader.loadAsync(src)));
+  entries.forEach(([k], i) => {
+    const t = texes[i];
+    t.colorSpace = THREE.NoColorSpace;
+    t.flipY = false; // y-down camera flips plane UVs; unflipped data renders upright
+    t.minFilter = THREE.LinearFilter;
+    t.generateMipmaps = false;
+    TEX[k] = t;
+  });
+  if (!signImg.complete) await new Promise(res => { signImg.onload = res; signImg.onerror = res; });
+
+  buildScene();
+  assetsReady = true;
+  resize(); // now that meshes exist, lay them out
+}
+
+// `run` was created at module load, so the menu already has a needle to draw
+if (location.hash.includes("autostart")) startRun(); // for automated screenshots/testing
+resize();
+loadAssets();
+
+let lastT = performance.now();
+function frame(now: number) {
+  const wall = Math.max(0, (now - lastT) / 1000);
+  lastT = now;
+  if (phase === "playing" && !paused) stepSim(wall);
+  stepFx(Math.min(wall, MAX_CATCHUP));
+  if (assetsReady) {
+    syncScene();
+    renderer.render(scene, camera);
+  }
+  drawUI();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+window.addEventListener("resize", resize);

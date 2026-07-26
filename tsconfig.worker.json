@@ -1,0 +1,12 @@
+{
+  // The Worker, the API, and the Node-side tooling that exercises them.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "types": ["@cloudflare/workers-types", "node"]
+  },
+  "include": ["worker/**/*.ts", "leaderboard/**/*.ts",
+              "pickthelock/engine.ts", "pickthelock/engine.test.ts",
+              "pickthelock/engine.build.test.ts"],
+  "exclude": ["node_modules"]
+}

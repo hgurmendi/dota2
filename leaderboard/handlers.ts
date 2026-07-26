@@ -24,29 +24,46 @@ import {
   SESSION_COOKIE, STATE_COOKIE, SESSION_TTL, STATE_TTL,
   mintSession, readSession, serializeCookie, clearCookie, readCookie,
   randomToken, timingSafeEqual,
-} from "./session.js";
-import * as steam from "./steam.js";
+} from "./session.ts";
+import * as steam from "./steam.ts";
+import type { SteamProfile } from "./steam.ts";
+import type { SessionPayload } from "./session.ts";
+
+/** Bindings and secrets the Worker is given. Everything but SESSION_SECRET is optional. */
+export interface Env {
+  SESSION_SECRET?: string;
+  STEAM_API_KEY?: string;
+  SITE_ORIGIN?: string;
+  DB?: D1Database;
+}
+
+interface PlayerRow {
+  steamid: string;
+  persona: string;
+  avatar: string;
+  banned: number;
+}
 
 // Where a login lands when nothing better is asked for. The root page carries
 // the sign-in UI and the game index; every game sits under it on the same
 // origin, which is what lets one session cover all of them.
 const HOME_PATH = "/";
 
-const json = (data, init = {}) =>
+const json = (data: unknown, init: ResponseInit = {}): Response =>
   new Response(JSON.stringify(data), {
     ...init,
     headers: { "content-type": "application/json; charset=utf-8",
                "cache-control": "no-store", ...(init.headers || {}) },
   });
 
-const redirect = (location, cookies = []) => {
+const redirect = (location: string, cookies: string[] = []): Response => {
   const headers = new Headers({ location, "cache-control": "no-store" });
   for (const c of cookies) headers.append("set-cookie", c);
   return new Response(null, { status: 302, headers });
 };
 
 /** The origin to build absolute URLs from. */
-function siteOrigin(request, env) {
+function siteOrigin(request: Request, env: Env): string {
   return env.SITE_ORIGIN || new URL(request.url).origin;
 }
 
@@ -55,20 +72,20 @@ function siteOrigin(request, env) {
  * taking a full URL from the query string here would make this an open
  * redirect, and a login endpoint is exactly where that gets abused.
  */
-function safeNext(url) {
+function safeNext(url: URL): string {
   const next = url.searchParams.get("next");
   if (typeof next !== "string") return HOME_PATH;
   if (!next.startsWith("/") || next.startsWith("//")) return HOME_PATH;
   return next;
 }
 
-async function currentSession(request, env) {
+async function currentSession(request: Request, env: Env): Promise<SessionPayload | null> {
   const token = readCookie(request.headers.get("cookie"), SESSION_COOKIE);
   if (!token) return null;
-  return readSession(env.SESSION_SECRET, token);
+  return readSession(env.SESSION_SECRET!, token);
 }
 
-async function upsertPlayer(env, profile) {
+async function upsertPlayer(env: Env, profile: SteamProfile): Promise<void> {
   if (!env.DB) return;
   const now = Math.floor(Date.now() / 1000);
   await env.DB.prepare(
@@ -79,16 +96,16 @@ async function upsertPlayer(env, profile) {
   ).bind(profile.steamid, profile.persona, profile.avatar, now).run();
 }
 
-async function loadPlayer(env, steamid) {
+async function loadPlayer(env: Env, steamid: string): Promise<PlayerRow | null> {
   if (!env.DB) return null;
   return env.DB.prepare(
     `SELECT steamid, persona, avatar, banned FROM players WHERE steamid = ?1`
-  ).bind(steamid).first();
+  ).bind(steamid).first<PlayerRow>();
 }
 
 // ---------- routes ----------
 
-export async function handle(request, env) {
+export async function handle(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "") || "/";
   const origin = siteOrigin(request, env);
@@ -142,7 +159,7 @@ export async function handle(request, env) {
     const profile = await steam.fetchProfile(env.STEAM_API_KEY, result.steamid);
     if (profile) await upsertPlayer(env, profile);
 
-    const token = await mintSession(env.SESSION_SECRET, result.steamid);
+    const token = await mintSession(env.SESSION_SECRET!, result.steamid);
     return redirect(next, [
       serializeCookie(SESSION_COOKIE, token, { maxAge: SESSION_TTL, secure }),
       clearCookie(STATE_COOKIE, { secure }),

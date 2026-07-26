@@ -4,14 +4,21 @@
   "type": "module",
   "description": "Browser recreations of Dota 2 minigames, with Steam sign-in and replay-verified leaderboards.",
   "scripts": {
-    "test": "node pickthelock/engine.test.mjs && node leaderboard/auth.test.mjs",
-    "dev": "node leaderboard/dev-server.mjs",
-    "dev:wrangler": "wrangler dev",
+    "build": "node build.mjs",
+    "typecheck": "tsc -p tsconfig.browser.json --noEmit && tsc -p tsconfig.worker.json --noEmit",
+    "test": "npm run build && npm run typecheck && node --experimental-strip-types --disable-warning=ExperimentalWarning pickthelock/engine.test.ts && node --experimental-strip-types --disable-warning=ExperimentalWarning pickthelock/engine.build.test.ts && node --experimental-strip-types --disable-warning=ExperimentalWarning leaderboard/auth.test.ts",
+    "dev": "npm run build && node --experimental-strip-types --disable-warning=ExperimentalWarning leaderboard/dev-server.ts",
+    "dev:wrangler": "npm run build && wrangler dev",
     "deploy": "wrangler deploy",
     "db:init": "wrangler d1 execute dota2 --remote --file=leaderboard/schema.sql",
     "db:init:local": "wrangler d1 execute dota2 --local --file=leaderboard/schema.sql"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260726.1",
+    "@types/node": "^26.1.1",
+    "@types/three": "^0.185.1",
+    "esbuild": "^0.28.1",
+    "typescript": "^7.0.2",
     "wrangler": "^4.0.0"
   }
 }

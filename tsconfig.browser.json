@@ -1,0 +1,17 @@
+{
+  // The game and the site's own scripts. Built by esbuild (npm run build).
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": [],
+    // Three.js is vendored and resolved by the importmap at runtime; the npm
+    // @types/three package supplies its types at build time.
+    "paths": {
+      "three": ["./node_modules/@types/three"],
+      "three/addons/*": ["./node_modules/@types/three/examples/jsm/*"]
+    }
+  },
+  "include": ["pickthelock/**/*.ts", "shared/**/*.ts"],
+  // tests run under Node, so they are checked by tsconfig.worker.json
+  "exclude": ["node_modules", "pickthelock/vendor", "**/*.test.ts"]
+}

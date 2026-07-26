@@ -20,6 +20,11 @@ node_modules/
 deploy-clean.sh
 .github/
 
+# TypeScript sources — the browser is served the built .js, not these
+*.ts
+tsconfig*.json
+build.mjs
+
 # docs and tests
 *.md
 *.test.mjs

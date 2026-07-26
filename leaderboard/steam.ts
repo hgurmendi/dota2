@@ -12,6 +12,29 @@
  * identity. Never use it as the verification target.
  */
 
+export type VerifyResult =
+  | { ok: true; steamid: string }
+  | { ok: false; reason: string };
+
+export interface SteamProfile {
+  steamid: string;
+  persona: string;
+  avatar: string;
+  profile: string;
+  visibility: number | null;
+}
+
+export type FetchLike = typeof fetch;
+
+/** Only the fields we read out of GetPlayerSummaries. */
+interface SteamProfileRaw {
+  steamid: string;
+  personaname?: unknown;
+  avatarfull?: unknown;
+  profileurl?: unknown;
+  communityvisibilitystate?: number;
+}
+
 export const STEAM_OPENID = "https://steamcommunity.com/openid/login";
 const NS = "http://specs.openid.net/auth/2.0";
 const IDENTIFIER_SELECT = NS + "/identifier_select";
@@ -20,7 +43,7 @@ const STEAM_API = "https://api.steampowered.com";
 const DOTA2_APPID = 570;
 
 /** Where to send the browser to start a login. */
-export function loginUrl(returnTo, realm) {
+export function loginUrl(returnTo: string, realm: string): string {
   const p = new URLSearchParams({
     "openid.ns": NS,
     "openid.mode": "checkid_setup",
@@ -33,7 +56,7 @@ export function loginUrl(returnTo, realm) {
 }
 
 /** Pull a 17-digit steamid64 out of a claimed_id, or null if it isn't one. */
-export function steamIdFrom(claimedId) {
+export function steamIdFrom(claimedId: unknown): string | null {
   if (typeof claimedId !== "string" || !claimedId.startsWith(ID_PREFIX)) return null;
   const id = claimedId.slice(ID_PREFIX.length);
   return /^\d{17}$/.test(id) ? id : null;
@@ -49,7 +72,8 @@ export function steamIdFrom(claimedId) {
  * `fetchImpl` is injectable purely so the tests can exercise this without
  * talking to Steam.
  */
-export async function verifyCallback(params, expectedReturnTo, fetchImpl = fetch) {
+export async function verifyCallback(params: URLSearchParams, expectedReturnTo: string,
+                                     fetchImpl: FetchLike = fetch): Promise<VerifyResult> {
   if (params.get("openid.mode") === "cancel") return { ok: false, reason: "cancelled" };
   if (params.get("openid.mode") !== "id_res") return { ok: false, reason: "mode" };
 
@@ -67,7 +91,7 @@ export async function verifyCallback(params, expectedReturnTo, fetchImpl = fetch
   const body = new URLSearchParams(params);
   body.set("openid.mode", "check_authentication");
 
-  let res;
+  let res: Response;
   try {
     res = await fetchImpl(STEAM_OPENID, {
       method: "POST",
@@ -90,14 +114,15 @@ export async function verifyCallback(params, expectedReturnTo, fetchImpl = fetch
 }
 
 /** Persona name and avatar for a steamid, or null. Never fatal to a login. */
-export async function fetchProfile(apiKey, steamid, fetchImpl = fetch) {
+export async function fetchProfile(apiKey: string | undefined, steamid: string,
+                                   fetchImpl: FetchLike = fetch): Promise<SteamProfile | null> {
   if (!apiKey) return null;
   const url = `${STEAM_API}/ISteamUser/GetPlayerSummaries/v2/` +
               `?key=${encodeURIComponent(apiKey)}&steamids=${encodeURIComponent(steamid)}`;
   try {
     const res = await fetchImpl(url);
     if (!res.ok) return null;
-    const data = await res.json();
+    const data = await res.json() as { response?: { players?: SteamProfileRaw[] } };
     const p = data?.response?.players?.[0];
     if (!p || p.steamid !== steamid) return null;
     return {
@@ -119,7 +144,8 @@ export async function fetchProfile(apiKey, steamid, fetchImpl = fetch) {
  * Returns null when it cannot be determined — a private profile hides this, so
  * null must never be treated as "doesn't own it".
  */
-export async function fetchDota2Ownership(apiKey, steamid, fetchImpl = fetch) {
+export async function fetchDota2Ownership(apiKey: string | undefined, steamid: string,
+                                          fetchImpl: FetchLike = fetch): Promise<{ owns: boolean; minutes: number } | null> {
   if (!apiKey) return null;
   const url = `${STEAM_API}/IPlayerService/GetOwnedGames/v1/` +
               `?key=${encodeURIComponent(apiKey)}&steamid=${encodeURIComponent(steamid)}` +
@@ -127,10 +153,10 @@ export async function fetchDota2Ownership(apiKey, steamid, fetchImpl = fetch) {
   try {
     const res = await fetchImpl(url);
     if (!res.ok) return null;
-    const data = await res.json();
+    const data = await res.json() as { response?: { games?: { appid: number; playtime_forever?: number }[] } };
     const games = data?.response?.games;
     if (!Array.isArray(games)) return null;   // private profile
-    const dota = games.find((g) => g.appid === DOTA2_APPID);
+    const dota = games.find((g: { appid: number }) => g.appid === DOTA2_APPID);
     return { owns: !!dota, minutes: dota?.playtime_forever ?? 0 };
   } catch {
     return null;

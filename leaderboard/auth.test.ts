@@ -8,16 +8,17 @@
 import {
   mintSession, readSession, serializeCookie, clearCookie, readCookie,
   randomToken, timingSafeEqual, SESSION_COOKIE, STATE_COOKIE,
-} from "./session.js";
-import * as steam from "./steam.js";
-import { handle } from "./handlers.js";
+} from "./session.ts";
+import * as steam from "./steam.ts";
+import { handle } from "./handlers.ts";
+import type { Env } from "./handlers.ts";
 
 let passed = 0, failed = 0;
-const check = (name, cond, detail = "") => {
+const check = (name: string, cond: boolean, detail: unknown = "") => {
   if (cond) { passed++; console.log("  ok   " + name); }
   else { failed++; console.log("  FAIL " + name + (detail ? "  — " + detail : "")); }
 };
-const section = (n) => console.log("\n" + n);
+const section = (n: string) => console.log("\n" + n);
 
 const SECRET = "test-secret-not-a-real-one";
 const STEAMID = "76561198012345678";
@@ -25,9 +26,9 @@ const ORIGIN = "https://example.test";
 const CLAIMED = "https://steamcommunity.com/openid/id/" + STEAMID;
 
 // ---------- a stub Steam ----------
-function steamStub({ valid = true, profile = true } = {}) {
-  const calls = [];
-  const fetchImpl = async (url, init) => {
+function steamStub({ valid = true, profile = true }: { valid?: boolean; profile?: boolean } = {}) {
+  const calls: { url: string; init?: RequestInit }[] = [];
+  const fetchImpl = (async (url: any, init?: any) => {
     calls.push({ url: String(url), init });
     if (String(url).startsWith("https://steamcommunity.com/openid/login")) {
       return new Response(`ns:http://specs.openid.net/auth/2.0\nis_valid:${valid}\n`, { status: 200 });
@@ -40,18 +41,18 @@ function steamStub({ valid = true, profile = true } = {}) {
       }] } }), { status: 200, headers: { "content-type": "application/json" } });
     }
     return new Response("unexpected", { status: 404 });
-  };
+  }) as typeof fetch;
   return { fetchImpl, calls };
 }
 
-function callbackParams(overrides = {}, returnTo) {
+function callbackParams(overrides: Record<string, string | null> = {}, returnTo?: string) {
   const p = new URLSearchParams({
     "openid.ns": "http://specs.openid.net/auth/2.0",
     "openid.mode": "id_res",
     "openid.op_endpoint": "https://steamcommunity.com/openid/login",
     "openid.claimed_id": CLAIMED,
     "openid.identity": CLAIMED,
-    "openid.return_to": returnTo,
+    "openid.return_to": returnTo ?? "",
     "openid.response_nonce": "2026-07-24T00:00:00Zabc",
     "openid.assoc_handle": "1234567890",
     "openid.signed": "signed,op_endpoint,claimed_id,identity,return_to,response_nonce,assoc_handle",
@@ -78,7 +79,7 @@ section("session tokens");
   check("rejects a swapped payload", (await readSession(SECRET, `${v}.${tamperedBody}.${sig}`)) === null);
   check("rejects a truncated signature", (await readSession(SECRET, `${v}.${body}.${sig.slice(0, -4)}`)) === null);
 
-  for (const bad of ["", "garbage", "v1.a", "v2." + body + "." + sig, null, undefined, 42]) {
+  for (const bad of ["", "garbage", "v1.a", "v2." + body + "." + sig, null, undefined, 42] as unknown[]) {
     check(`rejects ${JSON.stringify(bad)}`, (await readSession(SECRET, bad)) === null);
   }
 
@@ -138,8 +139,8 @@ section("callback verification");
     const { fetchImpl, calls } = steamStub();
     const r = await steam.verifyCallback(callbackParams({}, RT), RT, fetchImpl);
     check("accepts a genuine callback", r.ok && r.steamid === STEAMID, JSON.stringify(r));
-    check("verifies by POST to Steam", calls[0].init.method === "POST");
-    check("asks check_authentication", calls[0].init.body.includes("openid.mode=check_authentication"));
+    check("verifies by POST to Steam", calls[0]!.init!.method === "POST");
+    check("asks check_authentication", (calls[0]!.init!.body as string).includes("openid.mode=check_authentication"));
   }
 
   {
@@ -164,13 +165,13 @@ section("callback verification");
     check("rejects a replayed return_to", !r.ok && r.reason === "return_to");
   }
 
-  for (const [label, ov, reason] of [
+  for (const [label, ov, reason] of ([
     ["a cancelled login", { "openid.mode": "cancel" }, "cancelled"],
     ["a non-id_res mode", { "openid.mode": "setup_needed" }, "mode"],
     ["a mismatched identity", { "openid.identity": "https://steamcommunity.com/openid/id/76561198999999999" }, "identity"],
     ["a junk claimed_id", { "openid.claimed_id": "https://evil.test/x" }, "claimed_id"],
     ["a missing signature", { "openid.sig": null }, "unsigned"],
-  ]) {
+  ] as [string, Record<string, string | null>, string][])) {
     const { fetchImpl } = steamStub();
     const r = await steam.verifyCallback(callbackParams(ov, RT), RT, fetchImpl);
     check(`rejects ${label}`, !r.ok && r.reason === reason, JSON.stringify(r));
@@ -208,12 +209,12 @@ section("profile lookup");
 // ---------- routes ----------
 section("routes");
 {
-  const env = { SESSION_SECRET: SECRET, SITE_ORIGIN: ORIGIN };
-  const get = (p, headers = {}) => new Request(ORIGIN + p, { headers });
+  const env: Env = { SESSION_SECRET: SECRET, SITE_ORIGIN: ORIGIN };
+  const get = (p: string, headers: Record<string, string> = {}) => new Request(ORIGIN + p, { headers });
 
   {
     const r = await handle(get("/api/status"), env);
-    check("status is public and ok", r.status === 200 && (await r.json()).ok === true);
+    check("status is public and ok", r.status === 200 && ((await r.json()) as any).ok === true);
   }
   {
     const r = await handle(get("/api/me"), env);
@@ -222,7 +223,7 @@ section("routes");
   {
     const token = await mintSession(SECRET, STEAMID);
     const r = await handle(get("/api/me", { cookie: `${SESSION_COOKIE}=${token}` }), env);
-    const body = await r.json();
+    const body = await r.json() as any;
     check("me reports the signed-in steamid", r.status === 200 && body.steamid === STEAMID, JSON.stringify(body));
   }
   {
@@ -231,12 +232,12 @@ section("routes");
   }
   {
     const r = await handle(get("/api/auth/steam"), env);
-    const loc = new URL(r.headers.get("location"));
+    const loc = new URL(r.headers.get("location")!);
     const setCookie = r.headers.get("set-cookie") || "";
     check("login redirects to Steam", r.status === 302 && loc.host === "steamcommunity.com");
     check("login sets a state cookie", setCookie.includes(STATE_COOKIE));
     const state = setCookie.split("=")[1].split(";")[0];
-    const rt = new URL(loc.searchParams.get("openid.return_to"));
+    const rt = new URL(loc.searchParams.get("openid.return_to")!);
     check("state is carried in the signed return_to", rt.searchParams.get("state") === state);
   }
   {
@@ -264,13 +265,13 @@ section("routes");
   {
     // open-redirect guard on ?next=
     const r = await handle(get("/api/auth/steam?next=https://evil.test/steal"), env);
-    const rt = new URL(new URL(r.headers.get("location")).searchParams.get("openid.return_to"));
+    const rt = new URL(new URL(r.headers.get("location")!).searchParams.get("openid.return_to")!);
     check("next= cannot point off-origin", rt.searchParams.get("next") === "/");
     const r2 = await handle(get("/api/auth/steam?next=//evil.test/steal"), env);
-    const rt2 = new URL(new URL(r2.headers.get("location")).searchParams.get("openid.return_to"));
+    const rt2 = new URL(new URL(r2.headers.get("location")!).searchParams.get("openid.return_to")!);
     check("next= rejects protocol-relative", rt2.searchParams.get("next") === "/");
     const r3 = await handle(get("/api/auth/steam?next=/pickthelock/%23autostart"), env);
-    const rt3 = new URL(new URL(r3.headers.get("location")).searchParams.get("openid.return_to"));
+    const rt3 = new URL(new URL(r3.headers.get("location")!).searchParams.get("openid.return_to")!);
     check("next= keeps a same-origin path", rt3.searchParams.get("next") === "/pickthelock/#autostart");
   }
 }
@@ -279,11 +280,11 @@ section("routes");
 section("end to end: sign in, then use the session");
 {
   // an in-memory stand-in for the D1 binding
-  const rows = new Map();
+  const rows = new Map<string, any>();
   const DB = {
-    prepare(sql) {
+    prepare(sql: string) {
       return {
-        bind(...args) {
+        bind(...args: any[]) {
           return {
             async run() {
               if (/INSERT INTO players/.test(sql)) {
@@ -298,18 +299,18 @@ section("end to end: sign in, then use the session");
       };
     },
   };
-  const env = { SESSION_SECRET: SECRET, STEAM_API_KEY: "key", SITE_ORIGIN: ORIGIN, DB };
+  const env = { SESSION_SECRET: SECRET, STEAM_API_KEY: "key", SITE_ORIGIN: ORIGIN, DB } as unknown as Env;
 
   // 1. start a login and keep the state cookie Steam will sign back to us
   const start = await handle(new Request(ORIGIN + "/api/auth/steam"), env);
   const state = (start.headers.get("set-cookie") || "").split("=")[1].split(";")[0];
-  const returnTo = new URL(new URL(start.headers.get("location")).searchParams.get("openid.return_to"));
+  const returnTo = new URL(new URL(start.headers.get("location")!).searchParams.get("openid.return_to")!);
 
   // 2. Steam sends the browser back. Route the module's bare `fetch` at the stub.
   const { fetchImpl } = steamStub();
   const realFetch = globalThis.fetch;
   globalThis.fetch = fetchImpl;
-  let done;
+  let done: Response;
   try {
     const cb = new URL(returnTo);
     for (const [k, v] of callbackParams({}, returnTo.toString())) cb.searchParams.set(k, v);
@@ -319,7 +320,7 @@ section("end to end: sign in, then use the session");
   }
 
   const cookies = done.headers.getSetCookie?.() ?? [done.headers.get("set-cookie")];
-  const sessionCookie = cookies.find((c) => c && c.startsWith(SESSION_COOKIE + "="));
+  const sessionCookie: string | undefined = cookies.find((c) => c && c.startsWith(SESSION_COOKIE + "="));
   check("callback redirects home",
     done.status === 302 && done.headers.get("location") === "/",
     `${done.status} -> ${done.headers.get("location")}`);
@@ -329,15 +330,15 @@ section("end to end: sign in, then use the session");
   check("the player was persisted", rows.get(STEAMID)?.persona === "Test Player");
 
   // 3. the freshly issued cookie identifies the player
-  const token = sessionCookie.slice((SESSION_COOKIE + "=").length).split(";")[0];
+  const token = sessionCookie!.slice((SESSION_COOKIE + "=").length).split(";")[0];
   const me = await handle(new Request(ORIGIN + "/api/me", { headers: { cookie: `${SESSION_COOKIE}=${token}` } }), env);
-  const body = await me.json();
+  const body = await me.json() as any;
   check("me now returns the full profile",
     me.status === 200 && body.steamid === STEAMID && body.persona === "Test Player",
     JSON.stringify(body));
 
   // 4. a banned player holds a valid session but is refused
-  rows.get(STEAMID).banned = 1;
+  rows.get(STEAMID)!.banned = 1;
   const banned = await handle(new Request(ORIGIN + "/api/me", { headers: { cookie: `${SESSION_COOKIE}=${token}` } }), env);
   check("a banned player is refused despite a good session", banned.status === 403);
 }

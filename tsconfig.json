@@ -1,0 +1,8 @@
+{
+  // For editors. `npm run typecheck` checks both projects properly.
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.browser.json" },
+    { "path": "./tsconfig.worker.json" }
+  ]
+}
