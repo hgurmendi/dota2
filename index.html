@@ -84,9 +84,14 @@
   .btn:hover { background: rgba(201, 169, 79, 0.16); }
   .btn-quiet { border-color: var(--line); color: var(--muted); }
 
-  main { flex: 1; padding: clamp(1.6rem, 5vw, 3rem) clamp(1rem, 4vw, 3rem); }
-  .lede { max-width: 46ch; margin: 0 auto clamp(1.6rem, 4vw, 2.6rem); line-height: 1.6;
-         color: var(--muted); text-align: center; }
+  /* The board is the whole page, so centre it in whatever space is left
+     rather than parking it at the top. */
+  main {
+    flex: 1;
+    display: grid;
+    place-items: center;
+    padding: clamp(1.6rem, 5vw, 3rem) clamp(1rem, 4vw, 3rem);
+  }
 
   /* ---- the minigames board ----
      A rebuild of the board from the Dark Carnival event page, using its own
@@ -174,12 +179,6 @@
 </header>
 
 <main>
-  <p class="lede">
-    Browser recreations of the minigames from Dota&nbsp;2, rebuilt from the
-    game's own data files. Signing in is optional — everything is playable
-    without it.
-  </p>
-
   <div class="board">
     <div class="board-title">Minigames</div>
 
@@ -202,9 +201,9 @@
 </main>
 
 <footer>
-  Fan recreations. Dota&nbsp;2 art, audio and fonts © Valve Corporation; not
-  affiliated with or endorsed by Valve.
-  <a href="https://github.com/hgurmendi/dota2">Source on GitHub</a>.
+  Fan recreations. Dota&nbsp;2 assets © Valve Corporation; not affiliated with
+  or endorsed by Valve. <a href="https://github.com/hgurmendi/dota2">Source on
+  GitHub</a>.
 </footer>
 
 <script type="module">
@@ -219,7 +218,7 @@ function render(session) {
     const a = document.createElement("a");
     a.className = "btn";
     a.href = signInUrl("/");
-    a.textContent = "Sign in through Steam";
+    a.textContent = "Steam Sign In (optional)";
     el.append(a);
     return;
   }
