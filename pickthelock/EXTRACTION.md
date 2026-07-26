@@ -42,7 +42,18 @@ converts:
   four minigames (`whack_a_mole`, `jail_break`, `blimp_jump`, `assembly`).
 - `panorama/images/events/dark_carnival/overworld/encounter_node_container` —
   the hexagonal frame those icons sit in on the board. Kept separate rather
-  than pre-composited so every game's card can reuse it.
+  than pre-composited so the site can reuse it per game.
+- `panorama/images/events/dark_carnival/overworld/rewards_panel/wood_panel` —
+  the purple woodgrain panel with the scalloped valance along its bottom edge.
+  It is 560×2000 in the game files and designed to be bottom-anchored, so the
+  site crops it to the bottom 800px and lets the uniform grain run off the top.
+- `panorama/images/events/dark_carnival/overworld/panel_title_container` — the
+  riveted title plate. Also 560 wide: it and the panel are a designed pair, so
+  the site's board keeps that ratio.
+
+The event builds the board's icon paths at runtime from each minigame's id, so
+no layout file references them by name — they were found by listing the
+`overworld/minigames/` directory rather than by reading the UI.
 - `sounds/misc/dark_carnival/` — lockpick SFX (`lockpick_*`), minigame music
   (`minigame_mus_lp_01..05`), win/lose stingers (`minigame_mus_win/lose_*`).
 - `sounds/vo/event_dark_carnival_slark_games/` — Slark voice lines

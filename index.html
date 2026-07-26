@@ -7,6 +7,14 @@
 <link rel="icon" href="pickthelock/assets/favicon.ico">
 <meta name="description" content="Browser recreations of Dota 2's minigames.">
 <style>
+  /* Radiance is the event's UI face, already vendored for the game. Reused
+     here so the board's lettering matches the one it copies. */
+  @font-face {
+    font-family: "Radiance";
+    src: url("pickthelock/assets/fonts/radiance-semibold.otf") format("opentype");
+    font-weight: 100 900;
+    font-display: swap;
+  }
   :root {
     --bg: #0b0e14;
     --panel: rgba(18, 15, 13, 0.72);
@@ -21,7 +29,7 @@
   body {
     background: radial-gradient(ellipse at 50% -10%, #1a1408 0%, var(--bg) 55%) fixed;
     color: var(--text);
-    font-family: Georgia, "Times New Roman", serif;
+    font-family: "Radiance", Georgia, "Times New Roman", serif;
     display: flex;
     flex-direction: column;
     min-height: 100vh;
@@ -71,44 +79,75 @@
   .btn:hover { background: rgba(201, 169, 79, 0.16); }
   .btn-quiet { border-color: var(--line); color: var(--muted); }
 
-  main { flex: 1; padding: clamp(2rem, 6vw, 4rem) clamp(1rem, 4vw, 3rem); }
-  .lede { max-width: 46ch; margin: 0 0 2.5rem; line-height: 1.6; color: var(--muted); }
+  main { flex: 1; padding: clamp(1.6rem, 5vw, 3rem) clamp(1rem, 4vw, 3rem); }
+  .lede { max-width: 46ch; margin: 0 auto clamp(1.6rem, 4vw, 2.6rem); line-height: 1.6;
+         color: var(--muted); text-align: center; }
 
-  .games { display: grid; gap: 1.25rem; grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr)); max-width: 1100px; }
-  .game {
-    display: block;
-    text-decoration: none;
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    background: var(--panel);
-    overflow: hidden;
-    transition: border-color 140ms ease, transform 140ms ease;
+  /* ---- the minigames board ----
+     A rebuild of the board from the Dark Carnival event page, using its own
+     art: the purple woodgrain panel (bottom-anchored so its scalloped valance
+     shows), the riveted title plate, the hexagonal node frames, and each
+     minigame's icon. Panel and plate are both 560px wide in the game files —
+     they are a designed pair, so the board keeps that ratio. */
+  .board {
+    width: min(100%, 560px);
+    margin: 0 auto;
+    padding: 0 0 clamp(1.7rem, 4.6vw, 2.6rem);
+    /* bottom-anchored: the scallop lives at the image's bottom edge and the
+       grain above it is uniform, so any board height crops cleanly */
+    background: url('shared/board_panel.webp') bottom center / 100% auto no-repeat;
+    filter: drop-shadow(0 10px 24px rgba(0, 0, 0, 0.5));
   }
-  .game:hover { border-color: var(--gold); transform: translateY(-2px); }
-  /* The game's own icon from the event's minigame board, sitting in the same
-     hexagonal node frame the game uses there. The two are layered rather than
-     pre-composited so the frame can be reused by every game's card. */
-  .game .shot {
-    aspect-ratio: 16 / 10;
+  .board-title {
+    height: clamp(38px, 7vw, 52px);
+    margin: 0 0 clamp(0.7rem, 2.2vw, 1.15rem);
+    background: url('shared/board_title.webp') center / 100% 100% no-repeat;
     display: grid;
     place-items: center;
-    background:
-      radial-gradient(ellipse at 50% 45%, rgba(201, 169, 79, 0.10) 0%, transparent 62%),
-      #06080d;
+    font-size: clamp(0.85rem, 2.3vw, 1.05rem);
+    font-weight: 700;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: #e8dcc0;
+    text-shadow: 0 2px 3px rgba(0, 0, 0, 0.75);
   }
-  .game .icon {
-    width: 45%;
-    max-width: 132px;
+  /* 3 up, 2 below — the layout the event uses */
+  .board-row {
+    display: flex;
+    justify-content: center;
+    gap: clamp(0.4rem, 1.6vw, 0.9rem);
+    margin-bottom: clamp(0.2rem, 0.9vw, 0.5rem);
+  }
+  .node {
+    width: clamp(74px, 17vw, 104px);
     aspect-ratio: 1;
     background-image: var(--icon), url('shared/node_frame.webp');
-    background-size: 54% auto, contain;
+    background-size: 46% auto, contain;
     background-position: center, center;
     background-repeat: no-repeat;
-    filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.55));
+    display: block;
+    text-decoration: none;
+    position: relative;
+    transition: transform 140ms ease, filter 140ms ease;
   }
-  .game .body { padding: 1rem 1.1rem 1.2rem; }
-  .game h2 { margin: 0 0 0.35rem; font-size: 1.05rem; color: var(--gold-bright); font-weight: 700; }
-  .game p { margin: 0; font-size: 0.88rem; line-height: 1.5; color: var(--muted); }
+  a.node:hover { transform: translateY(-3px) scale(1.04); filter: brightness(1.15); }
+  a.node:focus-visible { outline: 2px solid var(--gold-bright); outline-offset: 4px; border-radius: 8px; }
+  /* Games that do not exist yet still appear, as they do in the event, but
+     are plainly inert rather than pretending to be links. */
+  .node.soon { filter: grayscale(0.55) brightness(0.62); opacity: 0.85; cursor: default; }
+  .node .label {
+    position: absolute;
+    inset: auto 50% -1.35rem auto;
+    transform: translateX(50%);
+    white-space: nowrap;
+    font-size: 0.62rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--muted);
+    opacity: 0;
+    transition: opacity 140ms ease;
+  }
+  a.node:hover .label, a.node:focus-visible .label { opacity: 1; color: var(--gold-bright); }
 
   footer {
     padding: 1.5rem clamp(1rem, 4vw, 3rem);
@@ -136,16 +175,25 @@
     without it.
   </p>
 
-  <div class="games">
-    <a class="game" href="/pickthelock/">
-      <span class="shot"><span class="icon" style="--icon: url('pickthelock/assets/icon.webp')"></span></span>
-      <span class="body">
-        <h2>Pick the Lock</h2>
-        <p>Catch the sweeping needle on each bar before the clock runs out.
-           From the Dark Carnival event.</p>
-      </span>
-    </a>
+  <div class="board">
+    <div class="board-title">Minigames</div>
+
+    <div class="board-row">
+      <a class="node" href="/pickthelock/" style="--icon: url('shared/icons/pick_the_lock.webp')"
+         aria-label="Pick the Lock"><span class="label">Pick the Lock</span></a>
+      <span class="node soon" style="--icon: url('shared/icons/whack_a_mole.webp')"
+            title="Not built yet" aria-label="Whack a Mole — not built yet"></span>
+      <span class="node soon" style="--icon: url('shared/icons/jail_break.webp')"
+            title="Not built yet" aria-label="Jailbreak — not built yet"></span>
+    </div>
+    <div class="board-row">
+      <span class="node soon" style="--icon: url('shared/icons/assembly.webp')"
+            title="Not built yet" aria-label="Assembly — not built yet"></span>
+      <span class="node soon" style="--icon: url('shared/icons/blimp_jump.webp')"
+            title="Not built yet" aria-label="Blimp Jump — not built yet"></span>
+    </div>
   </div>
+
 </main>
 
 <footer>
