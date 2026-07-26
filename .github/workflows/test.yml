@@ -17,9 +17,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          # 22+ required: the suites run TypeScript directly through
-          # node --experimental-strip-types.
-          node-version: 22
+          # Node 24 is the active LTS; 22 dropped to maintenance in March
+          # 2026. The suites run TypeScript directly, which needs 22 at
+          # minimum — 24 strips types without any flag at all.
+          node-version: 24
           cache: npm
       # Dependencies are required. The suites themselves import nothing, but
       # `npm test` builds first, and the build needs esbuild and typescript.

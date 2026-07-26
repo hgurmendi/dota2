@@ -85,11 +85,14 @@ Each step is one command; nothing here is reversible-by-accident.
    Cloudflare then runs `npm test` (build + type-check + all suites) on every
    push and deploys only if it passes.
 
-   Set `NODE_VERSION` = `22` under **Builds → Build configuration →
-   Environment variables**, not under Settings → Variables. The test scripts
-   run TypeScript through `node --experimental-strip-types`, which needs Node
-   22+. The two are different settings and only the build one is read at build
-   time.
+   Set `NODE_VERSION` = `24` under **Builds → Build configuration →
+   Environment variables**, not under Settings → Variables. The two are
+   different settings and only the build one is read at build time.
+
+   24 is the active LTS; 22 went to maintenance in March 2026. `.nvmrc` pins
+   the same version locally. The scripts still pass `--experimental-strip-types`
+   so they keep working on 22 — on 24 the flag is a no-op, since type stripping
+   is on by default there.
 
    Once this is connected, prefer pushing over `npm run deploy` — a CLI deploy
    puts the Worker ahead of `main`, which is the drift the connection exists to
