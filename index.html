@@ -140,35 +140,60 @@
     margin-bottom: calc(var(--bw) * 0.025);
   }
   .node {
-    width: 22%;
+    /* the board is exactly four icons wide */
+    width: 25%;
     aspect-ratio: 1;
+    display: block;
+    text-decoration: none;
+    position: relative;
+  }
+  /* The artwork lives on a pseudo-element so that dimming and highlighting
+     apply to it alone. A filter on .node would cascade into the tooltip and
+     wash out its text along with the icon. */
+  .node::before {
+    content: "";
+    position: absolute;
+    inset: 0;
     background-image: var(--icon), url('shared/node_frame.webp');
     background-size: 46% auto, contain;
     background-position: center, center;
     background-repeat: no-repeat;
-    display: block;
-    text-decoration: none;
-    position: relative;
-    transition: transform 140ms ease, filter 140ms ease;
+    /* highlight on hover, deliberately without growing — the board's nodes
+       hold their size and only light up */
+    transition: filter 140ms ease;
   }
-  a.node:hover { transform: translateY(-3px) scale(1.04); filter: brightness(1.15); }
+  a.node:hover::before,
+  a.node:focus-visible::before {
+    filter: brightness(1.3) drop-shadow(0 0 7px rgba(255, 233, 138, 0.4));
+  }
   a.node:focus-visible { outline: 2px solid var(--gold-bright); outline-offset: 4px; border-radius: 8px; }
-  /* Games that do not exist yet still appear, as they do in the event, but
-     are plainly inert rather than pretending to be links. */
-  .node.soon { filter: grayscale(0.55) brightness(0.62); opacity: 0.85; cursor: default; }
+
+  /* Games that are not built are inert: not links, visibly dimmed, and the
+     cursor says so. They still name themselves on hover, which is the point
+     of showing them at all. */
+  .node.soon { cursor: not-allowed; }
+  .node.soon::before { filter: grayscale(1) brightness(0.4); opacity: 0.6; }
+
   .node .label {
     position: absolute;
-    inset: auto 50% -1.35rem auto;
-    transform: translateX(50%);
+    top: calc(100% + 7px);
+    left: 50%;
+    transform: translateX(-50%);
     white-space: nowrap;
-    font-size: 0.62rem;
-    letter-spacing: 0.09em;
-    text-transform: uppercase;
-    color: var(--muted);
+    background: #3c3c42;
+    color: #ece7dc;
+    border: 1px solid rgba(0, 0, 0, 0.55);
+    border-radius: 4px;
+    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.45);
+    padding: 0.25em 0.6em;
+    font-size: 0.7rem;
+    letter-spacing: 0.05em;
     opacity: 0;
-    transition: opacity 140ms ease;
+    pointer-events: none;
+    transition: opacity 120ms ease;
   }
-  a.node:hover .label, a.node:focus-visible .label { opacity: 1; color: var(--gold-bright); }
+  .node:hover, .node:focus-visible { z-index: 2; }
+  .node:hover .label, .node:focus-visible .label { opacity: 1; }
 
   footer {
     padding: 1.5rem clamp(1rem, 4vw, 3rem);
@@ -197,15 +222,15 @@
       <a class="node" href="/pickthelock/" style="--icon: url('shared/icons/pick_the_lock.webp')"
          aria-label="Pick the Lock"><span class="label">Pick the Lock</span></a>
       <span class="node soon" style="--icon: url('shared/icons/jail_break.webp')"
-            title="Boot Breaker — not built yet" aria-label="Boot Breaker — not built yet"></span>
+            aria-disabled="true" aria-label="Boot Breaker, not built yet"><span class="label">Boot Breaker</span></span>
       <span class="node soon" style="--icon: url('shared/icons/blimp_jump.webp')"
-            title="Blimp Jump — not built yet" aria-label="Blimp Jump — not built yet"></span>
+            aria-disabled="true" aria-label="Blimp Jump, not built yet"><span class="label">Blimp Jump</span></span>
     </div>
     <div class="board-row">
       <span class="node soon" style="--icon: url('shared/icons/assembly.webp')"
-            title="Automaton Assembly — not built yet" aria-label="Automaton Assembly — not built yet"></span>
+            aria-disabled="true" aria-label="Automaton Assembly, not built yet"><span class="label">Automaton Assembly</span></span>
       <span class="node soon" style="--icon: url('shared/icons/whack_a_mole.webp')"
-            title="Typing Challenge — not built yet" aria-label="Typing Challenge — not built yet"></span>
+            aria-disabled="true" aria-label="Automaton Attack, not built yet"><span class="label">Automaton Attack</span></span>
     </div>
   </div>
 
