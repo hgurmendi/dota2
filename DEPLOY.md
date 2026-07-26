@@ -82,12 +82,35 @@ Each step is one command; nothing here is reversible-by-accident.
 
 7. **Connect Git so the Worker tracks `main`.** Workers dashboard → the
    Worker → Settings → Builds → connect `hgurmendi/dota2`, branch `main`.
-   Cloudflare then runs the `[build]` command (build + type-check + tests) on
-   every push and deploys only if it passes.
+   Cloudflare then runs `npm test` (build + type-check + all suites) on every
+   push and deploys only if it passes.
 
-   Until this is connected the deployed Worker is whatever was last pushed by
-   hand from a laptop, which can silently drift from `main`. `wrangler
-   deployments list` shows what is actually live.
+   Set `NODE_VERSION` = `22` under **Builds → Build configuration →
+   Environment variables**, not under Settings → Variables. The test scripts
+   run TypeScript through `node --experimental-strip-types`, which needs Node
+   22+. The two are different settings and only the build one is read at build
+   time.
+
+   Once this is connected, prefer pushing over `npm run deploy` — a CLI deploy
+   puts the Worker ahead of `main`, which is the drift the connection exists to
+   prevent. `wrangler deployments list` shows what is actually live and where
+   it came from.
+
+## A trap worth knowing
+
+`wrangler deploy` treats this repo as the source of truth for *plaintext*
+variables and routes, and overwrites whatever the dashboard has:
+
+```
+vars: { -  NODE_VERSION: "22" }
+Uploading the Worker will override the remote configuration with your local one.
+```
+
+That is a real deploy, not a hypothetical — a CLI deploy silently deleted a
+`NODE_VERSION` that had been set in the dashboard. **Secrets survive deploys;
+plaintext vars do not.** So anything that must persist belongs either in
+`[vars]` here, or in a setting `wrangler deploy` does not manage, such as the
+build environment.
 
 ## Notes
 
