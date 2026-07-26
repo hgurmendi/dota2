@@ -15,6 +15,11 @@
     font-weight: 100 900;
     font-display: swap;
   }
+  /* RadianceM, the game's fixed-width digits face, is vendored alongside it at
+     pickthelock/assets/fonts/radiancem-semibold.otf. Not declared here: it is
+     only worth loading somewhere numerals need to line up, such as a
+     leaderboard, and behind Radiance in a fallback chain it would never be
+     reached at all. */
   :root {
     --bg: #0b0e14;
     --panel: rgba(18, 15, 13, 0.72);
@@ -90,7 +95,7 @@
      minigame's icon. Panel and plate are both 560px wide in the game files —
      they are a designed pair, so the board keeps that ratio. */
   .board {
-    width: min(100%, 560px);
+    width: min(100%, 430px);
     margin: 0 auto;
     padding: 0 0 clamp(1.7rem, 4.6vw, 2.6rem);
     /* bottom-anchored: the scallop lives at the image's bottom edge and the
@@ -99,12 +104,12 @@
     filter: drop-shadow(0 10px 24px rgba(0, 0, 0, 0.5));
   }
   .board-title {
-    height: clamp(38px, 7vw, 52px);
+    height: clamp(32px, 6vw, 42px);
     margin: 0 0 clamp(0.7rem, 2.2vw, 1.15rem);
     background: url('shared/board_title.webp') center / 100% 100% no-repeat;
     display: grid;
     place-items: center;
-    font-size: clamp(0.85rem, 2.3vw, 1.05rem);
+    font-size: clamp(0.72rem, 2vw, 0.88rem);
     font-weight: 700;
     letter-spacing: 0.22em;
     text-transform: uppercase;
@@ -119,7 +124,7 @@
     margin-bottom: clamp(0.2rem, 0.9vw, 0.5rem);
   }
   .node {
-    width: clamp(74px, 17vw, 104px);
+    width: clamp(62px, 15vw, 82px);
     aspect-ratio: 1;
     background-image: var(--icon), url('shared/node_frame.webp');
     background-size: 46% auto, contain;
@@ -181,16 +186,16 @@
     <div class="board-row">
       <a class="node" href="/pickthelock/" style="--icon: url('shared/icons/pick_the_lock.webp')"
          aria-label="Pick the Lock"><span class="label">Pick the Lock</span></a>
-      <span class="node soon" style="--icon: url('shared/icons/whack_a_mole.webp')"
-            title="Not built yet" aria-label="Whack a Mole — not built yet"></span>
       <span class="node soon" style="--icon: url('shared/icons/jail_break.webp')"
-            title="Not built yet" aria-label="Jailbreak — not built yet"></span>
+            title="Boot Breaker — not built yet" aria-label="Boot Breaker — not built yet"></span>
+      <span class="node soon" style="--icon: url('shared/icons/blimp_jump.webp')"
+            title="Blimp Jump — not built yet" aria-label="Blimp Jump — not built yet"></span>
     </div>
     <div class="board-row">
       <span class="node soon" style="--icon: url('shared/icons/assembly.webp')"
-            title="Not built yet" aria-label="Assembly — not built yet"></span>
-      <span class="node soon" style="--icon: url('shared/icons/blimp_jump.webp')"
-            title="Not built yet" aria-label="Blimp Jump — not built yet"></span>
+            title="Automaton Assembly — not built yet" aria-label="Automaton Assembly — not built yet"></span>
+      <span class="node soon" style="--icon: url('shared/icons/whack_a_mole.webp')"
+            title="Typing Challenge — not built yet" aria-label="Typing Challenge — not built yet"></span>
     </div>
   </div>
 
